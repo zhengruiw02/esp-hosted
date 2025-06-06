@@ -1,9 +1,20 @@
-# Toolchain Path
-CROSS_COMPILE :=
-# Linux Kernel header
-KERNEL := /lib/modules/$(shell uname -r)/build
-# Architecture
-ARCH := $(shell uname -m)
+# # Toolchain Path
+# CROSS_COMPILE :=
+# # Linux Kernel header
+# KERNEL := /lib/modules/$(shell uname -r)/build
+# # Architecture
+# ARCH := $(shell uname -m)
+
+# target=spi or target=sdio
+
+CROSS_COMPILE := aarch64-linux-gnu-
+KERNEL := ~/workspace/rpi/linux-rpi-6.12.25_20250428 
+ARCH := arm64
+
+# CROSS_COMPILE := ~/workspace/openwrt-linkit/staging_dir/toolchain-mipsel_24kc_gcc-14.2.0_musl/bin/mipsel-openwrt-linux-musl- 
+# KERNEL := ~/workspace/openwrt-linkit/build_dir/target-mipsel_24kc_musl/linux-ramips_mt76x8/linux-6.6.90
+# ARCH := mips 
+# STAGING_DIR := ~/workspace/openwrt-linkit/staging_dir
 
 # Check and adjust ARCH for specific cases
 ifeq ($(ARCH), x86_64)
