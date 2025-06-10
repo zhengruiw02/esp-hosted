@@ -1593,7 +1593,6 @@ int ctrl_app_send_req(ctrl_cmd_t *app_req)
 			CTRL_ALLOC_ASSIGN(CtrlMsgReqSetMode, req_set_power_save_mode);
 
 			if ((p->ps_mode < WIFI_PS_NONE) ||
-			    (p->ps_mode < WIFI_PS_MIN_MODEM) ||
 			    (p->ps_mode >= WIFI_PS_INVALID)) {
 				command_log("Invalid power save mode\n");
 				failure_status = CTRL_ERR_INCORRECT_ARG;
@@ -1766,6 +1765,10 @@ fail_req2:
 int deinit_hosted_control_lib_internal(void)
 {
 	int ret = SUCCESS;
+
+	if (is_ctrl_lib_state(CTRL_LIB_STATE_INACTIVE)) {
+		return SUCCESS;
+	}
 
 	set_ctrl_lib_state(CTRL_LIB_STATE_INACTIVE);
 
