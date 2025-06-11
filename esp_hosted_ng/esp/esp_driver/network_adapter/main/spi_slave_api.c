@@ -118,7 +118,7 @@ uint8_t g_spi_mode = SPI_MODE_2;
 #define GPIO_MOSI              7
 #define GPIO_MISO              2
 #define GPIO_SCLK              6
-#define GPIO_CS                10
+#define GPIO_CS                8   //  10
 #define DMA_CHAN               SPI_DMA_CH_AUTO
 
 #define SPI_CLK_MHZ            30
@@ -129,7 +129,7 @@ uint8_t g_spi_mode = SPI_MODE_2;
 #define GPIO_MOSI           7
 #define GPIO_MISO           2
 #define GPIO_SCLK           6
-#define GPIO_CS             8
+#define GPIO_CS             8   //  10
 #define DMA_CHAN            SPI_DMA_CH_AUTO
 
 #define SPI_CLK_MHZ         26
