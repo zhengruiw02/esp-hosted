@@ -7,14 +7,19 @@
 
 # target=spi or target=sdio
 
-CROSS_COMPILE := aarch64-linux-gnu-
-KERNEL := ~/workspace/rpi/linux-rpi-6.12.25_20250428 
-ARCH := arm64
+# CROSS_COMPILE := aarch64-linux-gnu-
+# KERNEL := ~/workspace/rpi/linux-rpi-6.12.25_20250428 
+# ARCH := arm64
 
-# CROSS_COMPILE := ~/workspace/openwrt-linkit/staging_dir/toolchain-mipsel_24kc_gcc-14.2.0_musl/bin/mipsel-openwrt-linux-musl- 
-# KERNEL := ~/workspace/openwrt-linkit/build_dir/target-mipsel_24kc_musl/linux-ramips_mt76x8/linux-6.6.90
-# ARCH := mips 
-# STAGING_DIR := ~/workspace/openwrt-linkit/staging_dir
+OPENWRT_DIR := ~/workspace/openwrt-linkit
+CROSS_COMPILE := ${OPENWRT_DIR}/staging_dir/toolchain-mipsel_24kc_gcc-14.2.0_musl/bin/mipsel-openwrt-linux-musl- 
+KERNEL := ${OPENWRT_DIR}/build_dir/target-mipsel_24kc_musl/linux-ramips_mt76x8/linux-6.6.90
+ARCH := mips 
+STAGING_DIR := ${OPENWRT_DIR}/staging_dir/target-mipsel_24kc_musl
+SYMBOL_DIR :=  ${OPENWRT_DIR}/build_dir/target-mipsel_24kc_musl/linux-ramips_mt76x8/symvers
+
+KBUILD_EXTRA_SYMBOLS:="${SYMBOL_DIR}/mac80211.symvers" 
+
 
 # Normalize ARCH
 ifeq ($(ARCH), x86_64)
@@ -62,7 +67,9 @@ $(MODULE_NAME)-y := $(module_objects)
 
 # Build targets
 all: clean
-	$(MAKE) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) -C $(KERNEL) M=$(PWD) modules
+	$(MAKE) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) \
+	STAGING_DIR=$(STAGING_DIR) KBUILD_EXTRA_SYMBOLS=$(KBUILD_EXTRA_SYMBOLS) \
+	-C $(KERNEL) M=$(PWD) modules
 
 clean:
 	rm -rf *.o */*.o *.ko *.mod.c *.symvers *.order .*.cmd .tmp_versions
