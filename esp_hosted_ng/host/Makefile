@@ -11,14 +11,19 @@
 # KERNEL := ~/workspace/rpi/linux-rpi-6.12.25_20250428 
 # ARCH := arm64
 
-OPENWRT_DIR := ~/workspace/openwrt-linkit
-CROSS_COMPILE := ${OPENWRT_DIR}/staging_dir/toolchain-mipsel_24kc_gcc-14.2.0_musl/bin/mipsel-openwrt-linux-musl- 
-KERNEL := ${OPENWRT_DIR}/build_dir/target-mipsel_24kc_musl/linux-ramips_mt76x8/linux-6.6.90
-ARCH := mips 
-STAGING_DIR := ${OPENWRT_DIR}/staging_dir/target-mipsel_24kc_musl
-SYMBOL_DIR :=  ${OPENWRT_DIR}/build_dir/target-mipsel_24kc_musl/linux-ramips_mt76x8/symvers
-
-KBUILD_EXTRA_SYMBOLS:="${SYMBOL_DIR}/mac80211.symvers" 
+ARCH := mips
+OPENWRT_DIR     := ~/workspace/openwrt-linkit
+OPENWRT_TARGET_ARCH     := target-mipsel_24kc_musl
+OPENWRT_TARGET          := linux-ramips_mt76x8
+OPENWRT_KERNEL_VER      := linux-6.6.95
+OPENWRT_TOOLCHAIN_VER   := toolchain-mipsel_24kc_gcc-14.3.0_musl
+OPENWRT_TOOLCHAIN_BIN   := mipsel-openwrt-linux-musl-
+BUILD_TARGET_DIR := ${OPENWRT_DIR}/build_dir/${OPENWRT_TARGET_ARCH}/${OPENWRT_TARGET}
+KERNEL := ${BUILD_TARGET_DIR}/${OPENWRT_KERNEL_VER}
+SYMBOL_DIR := ${BUILD_TARGET_DIR}/symvers
+CROSS_COMPILE := ${OPENWRT_DIR}/staging_dir/${OPENWRT_TOOLCHAIN_VER}/bin/${OPENWRT_TOOLCHAIN_BIN}
+STAGING_DIR := ${OPENWRT_DIR}/staging_dir/${OPENWRT_TARGET_ARCH}
+KBUILD_EXTRA_SYMBOLS := ${SYMBOL_DIR}/mac80211.symvers
 
 
 # Normalize ARCH
@@ -32,6 +37,7 @@ endif
 # Module name (default: sdio)
 target ?= sdio
 MODULE_NAME := esp32_$(target)
+MAPFILE := $(MODULE_NAME).map
 
 # Debug and AP support
 CONFIG_DEBUG_LOGS ?= y
@@ -65,16 +71,24 @@ CFLAGS_esp_log.o = -DDEBUG
 obj-m := $(MODULE_NAME).o
 $(MODULE_NAME)-y := $(module_objects)
 
-# Build targets
-all: clean
-	$(MAKE) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) \
-	STAGING_DIR=$(STAGING_DIR) KBUILD_EXTRA_SYMBOLS=$(KBUILD_EXTRA_SYMBOLS) \
-	-C $(KERNEL) M=$(PWD) modules
+# Default build target with MAP file generation
+all: clean modules map
+# all: clean modules
 
+modules:
+	$(MAKE) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) \
+		STAGING_DIR=$(STAGING_DIR) KBUILD_EXTRA_SYMBOLS=$(KBUILD_EXTRA_SYMBOLS) \
+		-C $(KERNEL) M=$(PWD) modules
+
+# Link manually for MAP file
+map:
+	$(CROSS_COMPILE)ld -m elf32ltsmip -r --cref --Map=$(MAPFILE) -o $(MODULE_NAME).ko.tmp \
+		--whole-archive $(patsubst %.o, %.o, $(module_objects)) \
+		--no-whole-archive
+        
 clean:
-	rm -rf *.o */*.o *.ko *.mod.c *.symvers *.order .*.cmd .tmp_versions
+	rm -rf *.o */*.o *.ko *.mod.c *.symvers *.order .*.cmd .tmp_versions *.map *.ko.tmp
 	$(MAKE) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) -C $(KERNEL) M=$(PWD) clean
 
 check:
 	$(MAKE) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) -C $(KERNEL) M=$(PWD) $(module_objects)
-
