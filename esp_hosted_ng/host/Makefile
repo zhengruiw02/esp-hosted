@@ -11,13 +11,25 @@
 # KERNEL := ~/workspace/rpi/linux-rpi-6.12.25_20250428 
 # ARCH := arm64
 
-ARCH := mips
-OPENWRT_DIR     := ~/workspace/openwrt-linkit
-OPENWRT_TARGET_ARCH     := target-mipsel_24kc_musl
-OPENWRT_TARGET          := linux-ramips_mt76x8
-OPENWRT_KERNEL_VER      := linux-6.6.95
-OPENWRT_TOOLCHAIN_VER   := toolchain-mipsel_24kc_gcc-14.3.0_musl
-OPENWRT_TOOLCHAIN_BIN   := mipsel-openwrt-linux-musl-
+
+# ARCH := mips
+# OPENWRT_DIR     := ~/workspace/openwrt-linkit
+# OPENWRT_TARGET_ARCH     := target-mipsel_24kc_musl
+# OPENWRT_TARGET          := linux-ramips_mt76x8
+# OPENWRT_KERNEL_VER      := linux-6.6.95
+# OPENWRT_TOOLCHAIN_VER   := toolchain-mipsel_24kc_gcc-14.3.0_musl
+# OPENWRT_TOOLCHAIN_BIN   := mipsel-openwrt-linux-musl-
+# OPENWRT_TOOLCHAIN_ELF	  := elf32ltsmip
+
+ARCH := arm64
+OPENWRT_DIR     := ~/workspace/openwrt-rpi
+OPENWRT_TARGET_ARCH     := target-aarch64_cortex-a72_musl
+OPENWRT_TARGET          := linux-bcm27xx_bcm2711
+OPENWRT_KERNEL_VER      := linux-6.12.35
+OPENWRT_TOOLCHAIN_VER   := toolchain-aarch64_cortex-a72_gcc-14.3.0_musl
+OPENWRT_TOOLCHAIN_BIN   := aarch64-openwrt-linux-musl-
+OPENWRT_TOOLCHAIN_ELF	:= aarch64elf
+
 BUILD_TARGET_DIR := ${OPENWRT_DIR}/build_dir/${OPENWRT_TARGET_ARCH}/${OPENWRT_TARGET}
 KERNEL := ${BUILD_TARGET_DIR}/${OPENWRT_KERNEL_VER}
 SYMBOL_DIR := ${BUILD_TARGET_DIR}/symvers
@@ -82,10 +94,10 @@ modules:
 
 # Link manually for MAP file
 map:
-	$(CROSS_COMPILE)ld -m elf32ltsmip -r --cref --Map=$(MAPFILE) -o $(MODULE_NAME).ko.tmp \
+	$(CROSS_COMPILE)ld -m $(OPENWRT_TOOLCHAIN_ELF) -r --cref --Map=$(MAPFILE) -o $(MODULE_NAME).ko.tmp \
 		--whole-archive $(patsubst %.o, %.o, $(module_objects)) \
 		--no-whole-archive
-        
+
 clean:
 	rm -rf *.o */*.o *.ko *.mod.c *.symvers *.order .*.cmd .tmp_versions *.map *.ko.tmp
 	$(MAKE) ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) -C $(KERNEL) M=$(PWD) clean
