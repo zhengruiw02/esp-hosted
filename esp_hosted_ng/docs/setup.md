@@ -15,6 +15,7 @@
 - [3. Troubleshoot Setup Problems](#3-troubleshoot-setup-problems)
 - [4. Points to note](#4-points-to-note)
 - [5. Ota Support](#5-ota-support)
+- [6. Manually loading and unloading the Kernel Module](#6-manually-loading-and-unloading-the-kernel-module)
 
 # 1. Software setup
 * This section briefly explains software setup required for esp hosted device and host. Esp hosted device setup is divided into two parts 
@@ -182,6 +183,7 @@ directory
          - add `ap_support` if you want to use interface as access point.
         * This script compiles and loads host driver on Raspberry-Pi. It also creates network interface `wlanX` which is used as a control interface for Wi-Fi on ESP peripheral
 
+        * Follow these steps to [Manually load the Kernel Module](6-manually-loading-and-unloading-the-kernel-module)
     * For esp firmware if you are using [ESP Quick start guide](#12-esp-quick-start-guide)
         * Please flash the required binaries using with command mentioned in `flashing_cmd.txt` within desired transport configuration folder as explained in [ESP Quick start guide](#12-esp-quick-start-guide).  
         * Use minicom or any similar terminal emulator with baud rate 115200 to fetch esp side logs on UART
@@ -232,16 +234,16 @@ directory
     * In this setup, ESP board acts as a SDIO peripheral and provides Wi-Fi capabilities to host. Please connect ESP board to Raspberry-Pi with jumper cables as mentioned below. Raspberry Pi should be powered with correct incoming power rating. ESP can be powered through PC using micro-USB/USB-C cable.
     * **Pin connections**
 
-        | Raspberry-Pi Pin | ESP32 Pin | ESP32-C6 Pin | Function |
-        |:-------:|:---------:|:--------:|:--------:|
-        | 13 | IO13+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/sd_pullup_requirements.html)| IO23+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c6/api-reference/peripherals/sd_pullup_requirements.html) | DAT3 |
-        | 15 | IO14 | IO19 | CLK |
-        | 16 | IO15+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/sd_pullup_requirements.html) | IO18+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c6/api-reference/peripherals/sd_pullup_requirements.html) | CMD |
-        | 18 | IO2+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/sd_pullup_requirements.html)| IO20+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c6/api-reference/peripherals/sd_pullup_requirements.html) | DAT0 |
-        | 22 | IO4+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/sd_pullup_requirements.html)| IO21+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c6/api-reference/peripherals/sd_pullup_requirements.html) | DAT1 |
-        | 31 | EN  | ESP Reset |
-        | 37 | IO12+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/sd_pullup_requirements.html)| IO22+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c6/api-reference/peripherals/sd_pullup_requirements.html) | DAT2 |
-        | 39 | GND | GND | GND|
+        | Raspberry-Pi Pin | ESP32 Pin | ESP32-C6 Pin | ESP32-C5 | Function |
+        | :--------------: | :-------: | :----------: | :------: | :------: |
+        | 13 | IO13+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/sd_pullup_requirements.html) | IO23+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c6/api-reference/peripherals/sd_pullup_requirements.html) | IO13+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/sd_pullup_requirements.html) | DAT3 |
+        | 15 | IO14 | IO19 | IO9 | CLK |
+        | 16 | IO15+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/sd_pullup_requirements.html) | IO18+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c6/api-reference/peripherals/sd_pullup_requirements.html) | IO10+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/sd_pullup_requirements.html) | CMD |
+        | 18 | IO2+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/sd_pullup_requirements.html) | IO20+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c6/api-reference/peripherals/sd_pullup_requirements.html) | IO8+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c6/api-reference/peripherals/sd_pullup_requirements.html) | DAT0 |
+        | 22 | IO4+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/sd_pullup_requirements.html) | IO21+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c6/api-reference/peripherals/sd_pullup_requirements.html) | IO7+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c6/api-reference/peripherals/sd_pullup_requirements.html) | DAT1 |
+        | 31 | EN  | ESP Reset | ESP Reset | Reset |
+        | 37 | IO12+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/sd_pullup_requirements.html)| IO22+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c6/api-reference/peripherals/sd_pullup_requirements.html) | IO14+[pull-up](https://docs.espressif.com/projects/esp-idf/en/latest/esp32c6/api-reference/peripherals/sd_pullup_requirements.html) | DAT2 |
+        | 39 | GND | GND | GND | GND |
     * Raspberry-Pi pinout can be found [here!](https://pinout.xyz/pinout/sdio)
     * As SDIO faces signal integrity issues over jumper wires, we strongly recommend to **Design PCB boards with above connections**. If that is not possible. Use good quality extremely small (smaller than 5cm) jumper wires, all equal length. Join all possible grounds interconnected to lower noise. Add at least, 10k Ohm external pull-up resistors on 5 lines: CMD, DAT0-4. We use 51k Ohm resistors in our set-up.
 
@@ -271,6 +273,7 @@ directory
         - add `ap_support` if you want to use interface as access point.
         * This script compiles and loads host driver on Raspberry-Pi. It also creates network interface `wlanX` which is used for Wi-Fi in host.
 
+        * Follow these steps to [Manually load the Kernel Module](6-manually-loading-and-unloading-the-kernel-module)
     * For esp firmware if you are using [ESP Quick start guide](#12-esp-quick-start-guide)
         * Please flash the required binaries using with command mentioned in `flashing_cmd.txt` within desired transport configuration folder as explained in [ESP Quick start guide](#12-esp-quick-start-guide).  
         * Use minicom or any similar terminal emulator with baud rate 115200 to fetch esp side logs on UART
@@ -492,3 +495,70 @@ If Bootup event is not recieved in host `dmesg` as sample log above, please try 
     $ cd /esp_hosted/esp_hosted_ng/host
     $ ./rpi_init.sh <transport> ota_file="/path/to/ota_file"
     ```
+
+### 6. Manually loading and unloading the Kernel Module
+
+Once the kernel modules `esp32_sdio.ko` or `esp32_spi.ko` are built, they can be found in `esp_hosted/esp_hosted_ng/host/`. You may manually load or unload these modules as needed.
+
+---
+
+### **Module Parameters**
+
+| Parameter     | Description                                                  |
+| ------------- | ------------------------------------------------------------ |
+| `resetpin`    | GPIO pin used to reset the ESP peripheral                    |
+| `clockspeed`  | Clock frequency in MHz (max 50 for SDIO, 40 for SPI)         |
+| `raw_tp_mode` | Enables raw throughput mode to measure transport performance |
+| `ota_file`    | Path to the firmware binary for updating the ESP             |
+
+**Notes:**
+
+* `resetpin` is **mandatory**.
+* `clockspeed` is **optional**. If omitted:
+
+  * SDIO defaults to 25–50 MHz as per device tree.
+  * SPI defaults to 10 MHz.
+  * Ensure value is ≤50 MHz for SDIO, and does not exceed the device tree setting.
+* `raw_tp_mode` is **optional** and intended **only for testing the transport layer throughput**. It bypasses the protocol stack and sends raw DAPA frames directly between the host and ESP. Useful for stress testing or evaluating performance limits:
+
+  * `rawtp_host_to_esp`: Sends frames from Host → ESP.
+  * `rawtp_esp_to_host`: Sends frames from ESP → Host.
+* `ota_file` is **optional**. When specified, it triggers a firmware update on the ESP. After a successful update, the ESP reboots and reconnects automatically.
+
+---
+
+### **Loading the Module**
+
+**For SDIO:**
+
+```bash
+$ sudo insmod esp_hosted/esp_hosted_ng/host/esp32_sdio.ko resetpin=6
+```
+
+**For SPI:**
+
+```bash
+$ sudo insmod esp_hosted/esp_hosted_ng/host/esp32_spi.ko resetpin=6
+```
+
+You can also pass optional parameters:
+
+```bash
+$ sudo insmod esp32_sdio.ko resetpin=6 clockspeed=40 ota_file=/path/to/firmware.bin
+```
+
+---
+
+### **Unloading the Module**
+
+**For SDIO:**
+
+```bash
+$ sudo rmmod esp32_sdio
+```
+
+**For SPI:**
+
+```bash
+$ sudo rmmod esp32_spi
+```

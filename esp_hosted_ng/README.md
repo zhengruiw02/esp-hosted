@@ -63,6 +63,9 @@ ESP-Hosted-NG solution is supported on following ESP boards:
 | Supported Targets | ESP32 | ESP32-S2 | ESP32-S3 | ESP32-C2 | ESP32-C3 | ESP32-C6 | ESP32-C5 |
 | ----------------- | ----- | -------- | -------- | -------- | -------- | -------- | -------- |
 
+
+:warning: Note:
+[ESP32-C5 beta](https://github.com/espressif/esp-hosted/tree/feat/esp32c5_ng_beta_support) support has been added please click on link for more info
 Looking for other chipset? Please do check [Coming Soon](#5-coming-soon) section.
 
 
@@ -751,12 +754,27 @@ Refer [RAW throughput guide](docs/Raw_TP_Testing.md) for verifying connection as
 <td align="center">7.32 Mbps</td>
 </tr>
 <tr>
-<td rowspan=2 align="center">ESP32-C3</td>
+<td rowspan=1 align="center">ESP32-C3</td>
 <td rowspan=1 align="center">SPI</td>
 <td align="center">15.8 Mbps</td>
 <td align="center">15.2 Mbps</td>
 <td align="center">17.1 Mbps</td>
 <td align="center">14.9 Mbps</td>
+</tr>
+<tr>
+<td rowspan=2 align="center">ESP32-C5</td>
+<td rowspan=1 align="center">SDIO 2.4 ghz</td>
+<td align="center">11.2 Mbps</td>
+<td align="center">19.4 Mbps</td>
+<td align="center">37.8 Mbps</td>
+<td align="center">25.9 Mbps</td>
+</tr>
+<tr>
+<td align="center">SDIO 5 ghz</td>
+<td align="center">19.7 Mbps</td>
+<td align="center">18.4 Mbps</td>
+<td align="center">53.5 Mbps</td>
+<td align="center">30.4 Mbps</td>
 </tr>
 </tbody>
 </table>
