@@ -442,6 +442,16 @@ static int esp_cfg80211_scan(struct wiphy *wiphy,
 
 	if (!wiphy || !request || !request->wdev || !request->wdev->netdev) {
 		esp_info("%u invalid input\n", __LINE__);
+#if ADD_PRINTS_DEBUG_MAC80211
+		esp_info("wiphy = %d\n", wiphy);
+		esp_info("request = %d\n", request);
+		if(request){
+			esp_info("request->wdev = %d\n", request->wdev);
+			if(request->wdev){
+				esp_info("request->wdev->netdev = %d\n", request->wdev->netdev);
+			}
+		}
+#endif
 		return -EINVAL;
 	}
 
@@ -824,6 +834,14 @@ static int esp_cfg80211_get_tx_power(struct wiphy *wiphy,
 
 	if (!wiphy || !wdev || !dbm || !wdev->netdev) {
 		esp_info("%u invalid input\n", __LINE__);
+#if ADD_PRINTS_DEBUG_MAC80211
+		esp_info("wiphy = %d\n", wiphy);
+		esp_info("wdev = %d\n", wdev);
+		esp_info("dbm = %d\n", dbm);
+		if(wdev){
+			esp_info("wdev->netdev = %d\n", wdev->netdev);
+		}
+#endif
 		return -EINVAL;
 	}
 
@@ -1197,10 +1215,64 @@ static void esp_reg_notifier(struct wiphy *wiphy,
 	}
 }
 
+#if (USE_KMEMDMP == 1)
+struct cfg80211_ops *esp_get_ops(void)
+{
+	struct cfg80211_ops *ops;
+	ops = kmemdup(&esp_cfg80211_ops, sizeof(esp_cfg80211_ops), GFP_KERNEL);
+
+	return ops;
+}
+
+static void esp_set_supported_band(struct wiphy *wiphy, const int chipset)
+{
+	struct ieee80211_supported_band *sband;
+
+	// wiphy->bands[NL80211_BAND_2GHZ] = &esp_wifi_bands_2ghz;
+	// if (chipset == ESP_FIRMWARE_CHIP_ESP32C5) {
+	// 	wiphy->bands[NL80211_BAND_5GHZ] = &esp_wifi_bands_5ghz;
+	// }
+
+	// set 2G band
+	sband = kmemdup(&esp_wifi_bands_2ghz, sizeof(*sband), GFP_KERNEL);	
+
+	if (!sband)
+		goto err_out;
+
+	wiphy->bands[NL80211_BAND_2GHZ] = sband;
+
+	// set 5G band
+	if (chipset == ESP_FIRMWARE_CHIP_ESP32C5) {
+		sband = kmemdup(&esp_wifi_bands_5ghz, sizeof(*sband), GFP_KERNEL);
+		if (!sband)
+			goto err_out;
+		wiphy->bands[NL80211_BAND_5GHZ] = sband;
+	}
+
+	return;
+
+err_out:
+	esp_err("Failed to set supported band\n");
+}
+
+static void esp_unset_supported_band(struct wiphy *wiphy, const int chipset)
+{
+	kfree(wiphy->bands[NL80211_BAND_2GHZ]);
+	if (chipset == ESP_FIRMWARE_CHIP_ESP32C5) {
+		kfree(wiphy->bands[NL80211_BAND_5GHZ]);
+	}
+}
+#endif 
+
+// static struct ieee80211_rate esp_rates_copy[ARRAY_SIZE(esp_rates)] __attribute__((aligned(8)));
+
 int esp_add_wiphy(struct esp_adapter *adapter)
 {
 	struct wiphy *wiphy;
 	struct esp_device *esp_dev;
+#if (USE_KMEMDMP == 1)
+	struct cfg80211_ops *esp_ops;
+#endif
 	int ret = 0;
 
 	if (!adapter) {
@@ -1208,10 +1280,27 @@ int esp_add_wiphy(struct esp_adapter *adapter)
 		return -EINVAL;
 	}
 
+#if (USE_KMEMDMP == 1)
+	// kmemdup alloc memory
+	esp_ops = esp_get_ops();
+	if (!esp_ops)
+		return -ENOMEM;
+	wiphy = wiphy_new(esp_ops, sizeof(struct esp_device));
+#else
+
+	// priv_size = ALIGN(sizeof(struct esp_device), NETDEV_ALIGN)
+	// esp_info("sizeof(struct esp_device) =%d\n", sizeof(struct esp_device));	
+	// esp_info(" ALIGN(sizeof(struct esp_device), NETDEV_ALIGN) = %d\n",  ALIGN(sizeof(struct esp_device), NETDEV_ALIGN));
+	// wiphy = wiphy_new(&esp_cfg80211_ops, ALIGN(sizeof(struct esp_device), NETDEV_ALIGN));
+
 	wiphy = wiphy_new(&esp_cfg80211_ops, sizeof(struct esp_device));
+#endif
 
 	if (!wiphy) {
 		esp_err("Failed to create wiphy\n");
+#if (USE_KMEMDMP == 1)
+		kfree(esp_ops);
+#endif
 		return -EFAULT;
 	}
 
@@ -1222,6 +1311,10 @@ int esp_add_wiphy(struct esp_adapter *adapter)
 	esp_dev->adapter = adapter;
 
 	esp_dev->dev = adapter->dev;
+#if (USE_KMEMDMP == 1)
+	///  for free use when destory
+	esp_dev->ops = esp_ops;
+#endif
 
 	set_wiphy_dev(wiphy, esp_dev->dev);
 
@@ -1229,10 +1322,26 @@ int esp_add_wiphy(struct esp_adapter *adapter)
 #ifdef CONFIG_AP_MODE
 	wiphy->interface_modes |= BIT(NL80211_IFTYPE_AP);
 #endif
+
+#if (USE_KMEMDMP == 1)
+	esp_set_supported_band(wiphy, adapter->chipset);
+#else
 	wiphy->bands[NL80211_BAND_2GHZ] = &esp_wifi_bands_2ghz;
 	if (adapter->chipset == ESP_FIRMWARE_CHIP_ESP32C5) {
 		wiphy->bands[NL80211_BAND_5GHZ] = &esp_wifi_bands_5ghz;
 	}
+#endif
+
+#if ADD_PRINTS_DEBUG_MAC80211
+	//// prints
+	int n_bitrates = wiphy->bands[NL80211_BAND_2GHZ]->n_bitrates;
+	esp_info("esp_wifi_bands_2ghz n_bitrates = %d\n", n_bitrates);
+	int i = 0;
+	for (i = 0; i < n_bitrates; i++) {		
+		esp_info("curr sband->bitrates[i].bitrate %d\n", wiphy->bands[NL80211_BAND_2GHZ]->bitrates[i].bitrate);
+	}
+	//////////////
+#endif
 	/* Initialize cipher suits */
 	if (adapter->chipset == ESP_FIRMWARE_CHIP_ESP32C3 ||
 	    adapter->chipset == ESP_FIRMWARE_CHIP_ESP32S3 ||
@@ -1268,13 +1377,28 @@ int esp_add_wiphy(struct esp_adapter *adapter)
 	wiphy->features |= NL80211_FEATURE_SK_TX_STATUS;
 
 	ret = wiphy_register(wiphy);
+#if ADD_PRINTS_DEBUG_MAC80211
+	//// prints
+	n_bitrates = wiphy->bands[NL80211_BAND_2GHZ]->n_bitrates;
 
+	esp_info("esp_wifi_bands_2ghz n_bitrates = %d\n", n_bitrates);
+	i = 0;
+	for (i = 0; i < n_bitrates; i++) {		
+		esp_info("curr sband->bitrates[i].bitrate %d\n", wiphy->bands[NL80211_BAND_2GHZ]->bitrates[i].bitrate);
+	}
+	//////////////
+#endif
 	return ret;
 }
 
 int esp_remove_wiphy(struct esp_adapter *adapter)
 {
 	if (adapter && adapter->wiphy) {
+#if (USE_KMEMDMP == 1)
+		struct esp_device *esp_dev = wiphy_priv(adapter->wiphy);
+		kfree(esp_dev->ops);
+		esp_unset_supported_band(adapter->wiphy, adapter->chipset);
+#endif
 		wiphy_unregister(adapter->wiphy);
 		wiphy_free(adapter->wiphy);
 		adapter->wiphy = NULL;

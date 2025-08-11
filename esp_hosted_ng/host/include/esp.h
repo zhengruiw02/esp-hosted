@@ -20,6 +20,9 @@
 #include <net/bluetooth/hci_core.h>
 #include "adapter.h"
 
+#define USE_KMEMDMP					0
+#define ADD_PRINTS_DEBUG_MAC80211	1
+
 #define ESP_IF_TYPE_SDIO        1
 #define ESP_IF_TYPE_SPI         2
 
@@ -134,6 +137,9 @@ struct esp_device {
 	struct device           *dev;
 	struct wiphy            *wiphy;
 	struct esp_adapter      *adapter;
+#if (USE_KMEMDMP == 1)
+	struct cfg80211_ops 	*ops;
+#endif
 };
 
 struct esp_wifi_device {
