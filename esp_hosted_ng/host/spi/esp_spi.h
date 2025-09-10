@@ -9,6 +9,9 @@
 
 #include "esp.h"
 
+#define SPI_BUS_NUM		(0)
+#define SPI_CHIP_SEL	(1)
+
 #define HANDSHAKE_PIN           (512+5)		//GPIO5 PIN 29 	//22
 #define SPI_IRQ                 gpio_to_irq(HANDSHAKE_PIN)
 #define SPI_DATA_READY_PIN      (512+0)		//GPIO0 PIN 27	//27
