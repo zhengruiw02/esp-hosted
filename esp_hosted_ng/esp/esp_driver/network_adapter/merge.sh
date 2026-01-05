@@ -1,0 +1,1 @@
+python -m esptool --chip esp32c6 merge_bin --output esp_hosted_ng_esp32c6_merged.bin  0x0 build/bootloader/bootloader.bin 0x8000 build/partition_table/partition-table.bin 0xd000 build/ota_data_initial.bin 0x10000 build/network_adapter.bin
