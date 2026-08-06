@@ -214,7 +214,7 @@ $ git clone --recurse-submodules <url_of_esp_hosted_repository>
 $ cd esp-hosted
 $ git submodule update --init --recursive
 ```
-Please make sure that ESP and host checkeout to **same git commit**.
+Please make sure that ESP and host checkout to **same git commit**.
 
 ### 2.4 ESP-Hosted Setup and Load Project
 
@@ -235,5 +235,11 @@ Following guide explains how to use ESP-Hosted solution.
 
 # 4. ESP-Hosted Porting Guide to other Linux Platforms
 
-Following document explains guidelines for porting solution to othe Linux platforms
+Following document explains guidelines for porting solution to other Linux platforms
 * [Porting Guide](./porting_guide.md)
+
+# 5. ESP-Hosted Migration & Upgrade Guide
+
+How to upgrade slave firmware + host driver together (incl. OTA ordering), the
+host/slave version-compatibility rules, and what a release's binary set contains.
+* [Migration & Upgrade Guide](./Migration_Guide.md)

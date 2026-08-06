@@ -49,6 +49,8 @@
 #include "esp_mac.h"
 
 static const char TAG[] = "FW_MAIN";
+#define WIFI_TX_RETRY_COUNT       20
+#define WIFI_TX_RETRY_DELAY_US    1000
 
 #if CONFIG_ESP_WLAN_DEBUG
 static const char TAG_RX[] = "H -> S";
@@ -82,6 +84,75 @@ interface_context_t *if_context = NULL;
 interface_handle_t *if_handle = NULL;
 
 QueueHandle_t to_host_queue[MAX_PRIORITY_QUEUES] = {NULL};
+
+/* send_task handle so producers can wake it via xTaskNotifyGive instead of
+ * the send_task polling every tick (vTaskDelay(1)). NULL until the task starts. */
+TaskHandle_t send_task_handle = NULL;
+
+#ifdef ESP_DEBUG_STATS
+static uint32_t h2e_rx_pkts;
+static uint32_t h2e_rx_bytes;
+static uint32_t h2e_wifi_tx_ok;
+static uint32_t h2e_wifi_tx_fail;
+static uint32_t h2e_wifi_tx_retries;
+static uint32_t h2e_drop_invalid;
+static uint32_t h2e_drop_checksum;
+static uint32_t h2e_drop_not_ready;
+static TickType_t h2e_last_stats_tick;
+
+#define H2E_STATS_INC(counter) do { counter++; } while (0)
+#define H2E_STATS_ADD(counter, value) do { counter += (value); } while (0)
+
+static void print_h2e_stats(void)
+{
+    TickType_t now = xTaskGetTickCount();
+
+    if (now - h2e_last_stats_tick < pdMS_TO_TICKS(5000)) {
+        return;
+    }
+
+    h2e_last_stats_tick = now;
+    if (h2e_rx_pkts || h2e_wifi_tx_ok || h2e_wifi_tx_fail ||
+        h2e_drop_invalid || h2e_drop_checksum || h2e_drop_not_ready) {
+        ESP_LOGD(TAG, "H2E stats: rx=%lu bytes=%lu wifi_ok=%lu wifi_fail=%lu wifi_retries=%lu invalid=%lu csum=%lu not_ready=%lu",
+                 (unsigned long)h2e_rx_pkts, (unsigned long)h2e_rx_bytes,
+                 (unsigned long)h2e_wifi_tx_ok, (unsigned long)h2e_wifi_tx_fail,
+                 (unsigned long)h2e_wifi_tx_retries,
+                 (unsigned long)h2e_drop_invalid, (unsigned long)h2e_drop_checksum,
+                 (unsigned long)h2e_drop_not_ready);
+        h2e_rx_pkts = 0;
+        h2e_rx_bytes = 0;
+        h2e_wifi_tx_ok = 0;
+        h2e_wifi_tx_fail = 0;
+        h2e_wifi_tx_retries = 0;
+        h2e_drop_invalid = 0;
+        h2e_drop_checksum = 0;
+        h2e_drop_not_ready = 0;
+    }
+}
+#else
+#define H2E_STATS_INC(counter) do { } while (0)
+#define H2E_STATS_ADD(counter, value) do { } while (0)
+static inline void print_h2e_stats(void) { }
+#endif
+
+static int wifi_tx_with_retry(wifi_interface_t wifi_if, uint8_t *payload,
+                              uint16_t payload_len)
+{
+    int ret = 0;
+    uint16_t retry = 0;
+
+    do {
+        ret = esp_wifi_internal_tx(wifi_if, payload, payload_len);
+        if (ret != ESP_ERR_NO_MEM) {
+            break;
+        }
+        H2E_STATS_INC(h2e_wifi_tx_retries);
+        usleep(WIFI_TX_RETRY_DELAY_US);
+    } while (++retry < WIFI_TX_RETRY_COUNT);
+
+    return ret;
+}
 
 #if CONFIG_ESP_SPI_HOST_INTERFACE
 #ifdef CONFIG_IDF_TARGET_ESP32S2
@@ -173,7 +244,7 @@ uint8_t is_wakeup_needed(interface_buffer_handle_t *buf_handle)
 
             if (memcmp(target_ip, &ip_address, 4) == 0) {
                 /* Wake up host for self IP ARP request */
-                ESP_LOGD(TAG, "IP matched, Wakup host");
+                ESP_LOGD(TAG, "IP matched, Wake up host");
                 return 1;
             } else {
                 ESP_LOGD(TAG, "IP not matched, noop");
@@ -200,7 +271,7 @@ uint8_t is_wakeup_needed(interface_buffer_handle_t *buf_handle)
 
     if (memcmp(dev_mac, pos, MAC_ADDR_LEN) == 0) {
         ESP_LOG_BUFFER_HEXDUMP("Frame", pos, 32, ESP_LOG_DEBUG);
-        ESP_LOGD(TAG, "Unicast addr matched, wakup host");
+        ESP_LOGD(TAG, "Unicast addr matched, wake up host");
         return 1;
     }
 
@@ -225,9 +296,9 @@ esp_err_t wlan_ap_rx_callback(void *buffer, uint16_t len, void *eb)
     buf_handle.if_num = 0;
     buf_handle.payload_len = len;
     buf_handle.payload = buffer;
-    buf_handle.wlan_buf_handle = eb;
-    buf_handle.free_buf_handle = esp_wifi_internal_free_rx_buffer;
     buf_handle.pkt_type = PACKET_TYPE_DATA;
+    buf_handle.priv_buffer_handle = eb;
+    buf_handle.free_buf_handle = esp_wifi_internal_free_rx_buffer;
 
     /* ESP_LOGI(TAG, "Slave -> Host: AP data packet\n"); */
     /* ESP_LOG_BUFFER_HEXDUMP("RX", buffer, len, ESP_LOG_INFO); */
@@ -237,6 +308,9 @@ esp_err_t wlan_ap_rx_callback(void *buffer, uint16_t len, void *eb)
         ESP_LOGE(TAG, "Slave -> Host: Failed to send buffer\n");
         goto DONE;
     }
+
+    if (send_task_handle)
+        xTaskNotifyGive(send_task_handle);
 
     return ESP_OK;
 
@@ -265,9 +339,9 @@ esp_err_t wlan_sta_rx_callback(void *buffer, uint16_t len, void *eb)
     buf_handle.if_num = 0;
     buf_handle.payload_len = len;
     buf_handle.payload = buffer;
-    buf_handle.wlan_buf_handle = eb;
-    buf_handle.free_buf_handle = esp_wifi_internal_free_rx_buffer;
     buf_handle.pkt_type = PACKET_TYPE_DATA;
+    buf_handle.priv_buffer_handle = eb;
+    buf_handle.free_buf_handle = esp_wifi_internal_free_rx_buffer;
 
     ret = xQueueSend(to_host_queue[PRIO_Q_LOW], &buf_handle, portMAX_DELAY);
 
@@ -275,6 +349,9 @@ esp_err_t wlan_sta_rx_callback(void *buffer, uint16_t len, void *eb)
         ESP_LOGE(TAG, "Slave -> Host: Failed to send buffer\n");
         goto DONE;
     }
+
+    if (send_task_handle)
+        xTaskNotifyGive(send_task_handle);
 
     return ESP_OK;
 
@@ -306,9 +383,121 @@ void process_tx_pkt(interface_buffer_handle_t *buf_handle)
     }
 }
 
+static void free_tx_buf_handle(interface_buffer_handle_t *buf_handle)
+{
+    if (buf_handle->free_buf_handle && buf_handle->priv_buffer_handle) {
+        buf_handle->free_buf_handle(buf_handle->priv_buffer_handle);
+        buf_handle->priv_buffer_handle = NULL;
+    }
+}
+
+#ifdef CONFIG_ESP_SDIO_HOST_INTERFACE
+static void process_low_prio_tx_packets(uint16_t queued, uint8_t *aggr_buf)
+{
+    interface_buffer_handle_t buf_handle = {0};
+    uint16_t aggr_len = 0;
+    bool flush_after_pkt = false;
+
+    if (!queued) {
+        return;
+    }
+
+    if (!datapath) {
+        while (queued--) {
+            if (xQueueReceive(to_host_queue[PRIO_Q_LOW], &buf_handle, portMAX_DELAY)) {
+                process_tx_pkt(&buf_handle);
+            }
+        }
+        return;
+    }
+
+    if (!aggr_buf) {
+        if (xQueueReceive(to_host_queue[PRIO_Q_LOW], &buf_handle, portMAX_DELAY)) {
+            process_tx_pkt(&buf_handle);
+        }
+        return;
+    }
+
+    while (queued || uxQueueMessagesWaiting(to_host_queue[PRIO_Q_LOW])) {
+        struct esp_payload_header *header = NULL;
+        uint16_t frame_len = 0;
+        uint16_t aligned_len = 0;
+        uint16_t offset = sizeof(struct esp_payload_header);
+        TickType_t wait = queued ? portMAX_DELAY : 0;
+
+        if (!xQueueReceive(to_host_queue[PRIO_Q_LOW], &buf_handle, wait)) {
+            break;
+        }
+        if (queued) {
+            queued--;
+        }
+
+        if (!buf_handle.payload || !buf_handle.payload_len ||
+            buf_handle.payload_len + offset > SDIO_TX_AGGR_SIZE) {
+            free_tx_buf_handle(&buf_handle);
+            continue;
+        }
+
+        frame_len = buf_handle.payload_len + offset;
+        aligned_len = (frame_len + 3) & ~3;
+        flush_after_pkt = buf_handle.payload_len <= SDIO_TX_LATENCY_BYPASS_SIZE;
+        if (aggr_len && flush_after_pkt) {
+            xQueueSendToFront(to_host_queue[PRIO_Q_LOW], &buf_handle, 0);
+            break;
+        }
+        if (aggr_len && aggr_len + aligned_len > SDIO_TX_AGGR_SIZE) {
+            xQueueSendToFront(to_host_queue[PRIO_Q_LOW], &buf_handle, 0);
+            break;
+        }
+
+        if (power_save_on && wow.magic_pkt) {
+            if (is_wakeup_needed(&buf_handle)) {
+                ESP_LOGI(TAG, "Wakeup on Magic packet");
+                wake_host();
+                buf_handle.flag = 0xFF;
+            }
+        }
+
+        header = (struct esp_payload_header *) (aggr_buf + aggr_len);
+        memset(header, 0, sizeof(*header));
+        header->if_type = buf_handle.if_type;
+        header->if_num = buf_handle.if_num;
+        header->len = htole16(buf_handle.payload_len);
+        header->reserved2 = buf_handle.flag;
+        header->offset = htole16(offset);
+        header->packet_type = buf_handle.pkt_type;
+        memcpy(aggr_buf + aggr_len + offset, buf_handle.payload,
+               buf_handle.payload_len);
+        if (aligned_len > frame_len) {
+            memset(aggr_buf + aggr_len + frame_len, 0,
+                   aligned_len - frame_len);
+        }
+#if CONFIG_ESP_SDIO_CHECKSUM
+        header->checksum = htole16(compute_checksum(aggr_buf + aggr_len,
+                                                    frame_len));
+#endif
+        aggr_len += aligned_len;
+        free_tx_buf_handle(&buf_handle);
+        if (flush_after_pkt) {
+            break;
+        }
+    }
+
+    if (aggr_len) {
+        if (if_context && if_context->if_ops && if_context->if_ops->write) {
+            sdio_write_aggr(if_handle, aggr_buf, aggr_len);
+        }
+    }
+
+}
+#endif
+
 esp_err_t send_to_host(uint8_t prio_q_idx, interface_buffer_handle_t *buf_handle)
 {
-    return xQueueSend(to_host_queue[prio_q_idx], buf_handle, portMAX_DELAY);
+    esp_err_t ret = xQueueSend(to_host_queue[prio_q_idx], buf_handle, portMAX_DELAY);
+    if (ret == pdTRUE && send_task_handle)
+        xTaskNotifyGive(send_task_handle);
+    return ret;
 }
 
 /* Send data to host */
@@ -322,6 +511,13 @@ void send_task(void* pvParameters)
     uint16_t high_prio_pkt_waiting = 0;
     uint16_t mid_prio_pkt_waiting = 0;
     uint16_t low_prio_pkt_waiting = 0;
+#if CONFIG_ESP_SDIO_HOST_INTERFACE
+    uint8_t *sdio_aggr_buf = heap_caps_malloc(SDIO_TX_AGGR_SIZE, MALLOC_CAP_DMA);
+
+    if (!sdio_aggr_buf) {
+        ESP_LOGW(TAG, "SDIO aggregate buffer allocation failed, using single-packet path");
+    }
+#endif
 
     while (1) {
         high_prio_pkt_waiting = uxQueueMessagesWaiting(to_host_queue[PRIO_Q_HIGH]);
@@ -340,20 +536,18 @@ void send_task(void* pvParameters)
                 process_tx_pkt(&buf_handle);
             }
         } else if (low_prio_pkt_waiting) {
-            if (xQueueReceive(to_host_queue[PRIO_Q_LOW], &buf_handle, portMAX_DELAY)) {
 #if CONFIG_ESP_SDIO_HOST_INTERFACE
-                if (power_save_on && wow.magic_pkt) {
-                    if (is_wakeup_needed(&buf_handle)) {
-                        ESP_LOGI(TAG, "Wakeup on Magic packet");
-                        wake_host();
-                        buf_handle.flag = 0xFF;
-                    }
-                }
-#endif
+            process_low_prio_tx_packets(low_prio_pkt_waiting, sdio_aggr_buf);
+#else
+            if (xQueueReceive(to_host_queue[PRIO_Q_LOW], &buf_handle, portMAX_DELAY)) {
                 process_tx_pkt(&buf_handle);
             }
+#endif
         } else {
-            vTaskDelay(1);
+            /* All queues empty: block until a producer (RX callback or
+             * send_to_host) notifies us, instead of polling every tick
+             * (vTaskDelay(1) added up to 1 tick of latency per idle cycle). */
+            xTaskNotifyWait(0, ULONG_MAX, NULL, portMAX_DELAY);
         }
     }
 }
@@ -519,53 +713,112 @@ void process_rx_pkt(interface_buffer_handle_t *buf_handle)
     struct esp_payload_header *header = NULL;
     uint8_t *payload = NULL;
     uint16_t payload_len = 0;
+    uint16_t offset = 0;
+    uint16_t frame_len = 0;
+    uint16_t aligned_len = 0;
+    uint16_t pos = 0;
+#if CONFIG_ESP_SDIO_CHECKSUM
+    uint16_t rx_checksum = 0;
+    uint16_t checksum = 0;
+#endif
 
-    header = (struct esp_payload_header *) buf_handle->payload;
-    payload = buf_handle->payload + le16toh(header->offset);
-    payload_len = le16toh(header->len);
+    while (pos + sizeof(struct esp_payload_header) <= buf_handle->payload_len) {
+        header = (struct esp_payload_header *) (buf_handle->payload + pos);
+        offset = le16toh(header->offset);
+        payload_len = le16toh(header->len);
 
+        if (payload_len == 0) {
+            break;
+        }
+        if (!ESP_OFFSET_VALID(offset)) {
+            H2E_STATS_INC(h2e_drop_invalid);
+            ESP_LOGE(TAG, "Drop invalid pkt: len=%d offset=%d", payload_len, offset);
+            break;
+        }
+
+        frame_len = payload_len + offset;
+        aligned_len = (frame_len + 3) & ~3;
+        if (frame_len > RX_BUF_SIZE || pos + frame_len > buf_handle->payload_len) {
+            H2E_STATS_INC(h2e_drop_invalid);
+            ESP_LOGE(TAG, "Drop invalid aggregate pkt: pos=%d len=%d offset=%d total=%d",
+                     pos, payload_len, offset, buf_handle->payload_len);
+            break;
+        }
+
+#if CONFIG_ESP_SDIO_CHECKSUM
+        rx_checksum = le16toh(header->checksum);
+        header->checksum = 0;
+        checksum = compute_checksum(buf_handle->payload + pos, frame_len);
+        header->checksum = htole16(rx_checksum);
+        if (checksum != rx_checksum) {
+            H2E_STATS_INC(h2e_drop_checksum);
+            ESP_LOGD(TAG, "checksum mismatch");
+            break;
+        }
+#endif
+
+        payload = buf_handle->payload + pos + offset;
+        H2E_STATS_INC(h2e_rx_pkts);
+        H2E_STATS_ADD(h2e_rx_bytes, payload_len);
 #if CONFIG_ESP_WLAN_DEBUG
-    ESP_LOG_BUFFER_HEXDUMP(TAG_RX, payload, 8, ESP_LOG_INFO);
+        ESP_LOG_BUFFER_HEXDUMP(TAG_RX, payload, 8, ESP_LOG_INFO);
 #endif
-    /*ESP_LOG_BUFFER_HEXDUMP("SDIO Rx", payload, payload_len, ESP_LOG_INFO);*/
+        /*ESP_LOG_BUFFER_HEXDUMP("SDIO Rx", payload, payload_len, ESP_LOG_INFO);*/
 
-    if (header->packet_type == PACKET_TYPE_COMMAND_REQUEST) {
-        /* Process command Request */
-        /*ESP_LOG_BUFFER_HEXDUMP("Rx Cmd", payload, payload_len, ESP_LOG_INFO);*/
-        process_priv_commamd(buf_handle->if_type, payload, payload_len);
+        if (header->packet_type == PACKET_TYPE_COMMAND_REQUEST) {
+            /* Process command Request */
+            /*ESP_LOG_BUFFER_HEXDUMP("Rx Cmd", payload, payload_len, ESP_LOG_INFO);*/
+            process_priv_commamd(header->if_type, payload, payload_len);
 
-    } else if (header->packet_type == PACKET_TYPE_DATA) {
+        } else if (header->packet_type == PACKET_TYPE_DATA) {
 
-        /* ESP_LOGI(TAG, "Data packet on iface=%d", buf_handle->if_type); */
-        /* Data Path */
-        if (buf_handle->if_type == ESP_STA_IF) {
-            /*ESP_LOGI(TAG, "Station IF");*/
+            /* ESP_LOGI(TAG, "Data packet on iface=%d", header->if_type); */
+            /* Data Path */
+            if (header->if_type == ESP_STA_IF) {
+                /*ESP_LOGI(TAG, "Station IF");*/
 
-            /* Forward packet over station interface */
-            if (station_connected || association_ongoing) {
-                /*ESP_LOGI(TAG, "Send wlan\n");*/
-                esp_wifi_internal_tx(ESP_IF_WIFI_STA, payload, payload_len);
+                /* Forward packet over station interface */
+                if (station_connected || association_ongoing) {
+                    int ret = 0;
+                    /*ESP_LOGI(TAG, "Send wlan\n");*/
+                    ret = wifi_tx_with_retry(ESP_IF_WIFI_STA, payload, payload_len);
+                    if (ret) {
+                        H2E_STATS_INC(h2e_wifi_tx_fail);
+                        ESP_LOGW(TAG, "STA data tx failed=%d", ret);
+                    } else {
+                        H2E_STATS_INC(h2e_wifi_tx_ok);
+                    }
+                } else {
+                    H2E_STATS_INC(h2e_drop_not_ready);
+                }
+
+            } else if (header->if_type == ESP_AP_IF && softap_started) {
+
+                /* Forward packet over soft AP interface */
+                /* ESP_LOGI(TAG, "Send data pkt over wlan\n"); */
+                int ret = wifi_tx_with_retry(ESP_IF_WIFI_AP, payload, payload_len);
+                if (ret) {
+                    H2E_STATS_INC(h2e_wifi_tx_fail);
+                    ESP_LOGW(TAG, "Sending data failed=%d\n", ret);
+                } else {
+                    H2E_STATS_INC(h2e_wifi_tx_ok);
+                }
             }
-
-        } else if (buf_handle->if_type == ESP_AP_IF && softap_started) {
-
-            /* Forward packet over soft AP interface */
-            /* ESP_LOGI(TAG, "Send data pkt over wlan\n"); */
-            int ret = esp_wifi_internal_tx(ESP_IF_WIFI_AP, payload, payload_len);
-            if (ret) {
-                ESP_LOGE(TAG, "Sending data failed=%d\n", ret);
-            }
-        }
 #if defined(CONFIG_BT_ENABLED) && BLUETOOTH_HCI
-        else if (buf_handle->if_type == ESP_HCI_IF) {
-            /*ESP_LOG_BUFFER_HEXDUMP("H->S BT", payload, payload_len, ESP_LOG_INFO);*/
-            process_hci_rx_pkt(payload, payload_len);
-        }
+            else if (header->if_type == ESP_HCI_IF) {
+                /*ESP_LOG_BUFFER_HEXDUMP("H->S BT", payload, payload_len, ESP_LOG_INFO);*/
+                process_hci_rx_pkt(payload, payload_len);
+            }
 #endif
-        else if (buf_handle->if_type == ESP_TEST_IF) {
-            debug_update_raw_tp_rx_count(payload_len);
+            else if (header->if_type == ESP_TEST_IF) {
+                debug_update_raw_tp_rx_count(payload_len);
+            }
         }
+
+        pos += aligned_len;
     }
+    print_h2e_stats();
+
     /* Free buffer handle */
     if (buf_handle->free_buf_handle && buf_handle->priv_buffer_handle) {
         buf_handle->free_buf_handle(buf_handle->priv_buffer_handle);
@@ -737,7 +990,7 @@ void app_main()
     }
 
     assert(xTaskCreate(recv_task, "recv_task", TASK_DEFAULT_STACK_SIZE, NULL, TASK_DEFAULT_PRIO, NULL) == pdTRUE);
-    assert(xTaskCreate(send_task, "send_task", TASK_DEFAULT_STACK_SIZE, NULL, TASK_DEFAULT_PRIO, NULL) == pdTRUE);
+    assert(xTaskCreate(send_task, "send_task", TASK_DEFAULT_STACK_SIZE, NULL, TASK_DEFAULT_PRIO, &send_task_handle) == pdTRUE);
 
     create_debugging_tasks();
 

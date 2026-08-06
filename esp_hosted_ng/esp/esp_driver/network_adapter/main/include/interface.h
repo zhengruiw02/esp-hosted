@@ -18,6 +18,25 @@
 #define __TRANSPORT_LAYER_INTERFACE_H
 #include "esp_err.h"
 
+#include "adapter.h"
+
+/*
+ * Ensure payload header + alignment padding fits within 16 bytes.
+ */
+_Static_assert(ESP_MAX_OFFSET_SIZE <= 16,
+    "Payload header + alignment padding must fit within 16 bytes.");
+
+#ifdef CONFIG_SOC_WIFI_SUPPORTED
+#include "esp_private/wifi.h"
+
+/*
+ * Ensure ESP_MAX_OFFSET_SIZE fits within wifi_pkt_rx_ctrl_t headroom.
+ */
+_Static_assert((ESP_MAX_OFFSET_SIZE) <= sizeof(wifi_pkt_rx_ctrl_t),
+    "Max hosted header size exceeds wifi_pkt_rx_ctrl_t size. "
+    "Please contact https://github.com/espressif/esp-hosted/issues");
+#endif
+
 #ifdef CONFIG_ESP_SDIO_HOST_INTERFACE
 
 #if CONFIG_SOC_SDIO_SLAVE_SUPPORTED
@@ -27,6 +46,10 @@
 #endif
 
 #endif
+
+#define IS_WIFI_DATA_PACKET(buf) \
+    ((buf)->pkt_type == PACKET_TYPE_DATA && \
+    ((buf)->if_type == ESP_STA_IF || (buf)->if_type == ESP_AP_IF))
 
 typedef enum {
     LENGTH_1_BYTE  = 1,
@@ -94,6 +117,10 @@ typedef struct {
 interface_context_t * interface_insert_driver(int (*callback)(uint8_t val));
 int interface_remove_driver();
 /*void generate_startup_event(uint8_t cap);*/
+#ifdef CONFIG_ESP_SDIO_HOST_INTERFACE
+int32_t sdio_write_aggr(interface_handle_t *handle, uint8_t *payload,
+                        uint16_t payload_len);
+#endif
 esp_err_t send_to_host(uint8_t prio_q_idx, interface_buffer_handle_t *buf_handle);
 esp_err_t send_bootup_event_to_host(uint8_t cap);
 #endif

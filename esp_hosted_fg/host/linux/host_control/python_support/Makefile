@@ -1,7 +1,11 @@
 CC = gcc
 
-CFLAGS = -Wall -fPIC
-CROSS_COMPILE :=
+# Overridable for cross/Yocto builds (propagate from a parent make or pass
+# directly). --sysroot is wired in only when SDKTARGETSYSROOT is set.
+CROSS_COMPILE ?=
+SDKTARGETSYSROOT ?=
+SYSROOT_FLAG := $(if $(SDKTARGETSYSROOT),--sysroot=$(SDKTARGETSYSROOT))
+CFLAGS = -Wall -fPIC $(SYSROOT_FLAG)
 
 SRCS = $(wildcard *.c)
 OBJS = $(SRCS:.c=.o)
@@ -23,7 +27,6 @@ INCLUDE += -I$(DIR_CTRL_LIB)/src/include
 INCLUDE += -I$(DIR_SERIAL)/include
 INCLUDE += -I$(DIR_COMPONENTS)/include
 INCLUDE += -I$(DIR_LINUX_PORT)/include
-INCLUDE += -I$(DIR_C_SUPPORT)
 INCLUDE += -I.
 
 LIBPATH = -L$(LIB_DIR)
@@ -43,10 +46,10 @@ ensure_libs:
 	fi
 
 %.o: %.c
-	$(CC) $(CFLAGS) $(INCLUDE) -c $< -o $@
+	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(INCLUDE) -c $< -o $@
 
 $(TARGET): $(OBJS)
-	$(CC) $(CFLAGS) -shared -o $@ $^ $(LIBPATH) $(LIBS) $(LINKER)
+	$(CROSS_COMPILE)$(CC) $(CFLAGS) -shared -o $@ $^ $(LIBPATH) $(LIBS) $(LINKER)
 
 clean:
 	rm -f $(TARGET) *.o

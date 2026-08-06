@@ -1,7 +1,7 @@
 # Wi-Fi and BT/BLE connectivity Setup over SPI
 
-| Supported Targets | ESP32 | ESP32-S2 | ESP32-S3 | ESP32-C2 | ESP32-C3 | ESP32-C5 | ESP32-C6 |
-| ----------------- | ----- | -------- | -------- | -------- | -------- | -------- | -------- |
+| Supported Targets | ESP32 | ESP32-S2 | ESP32-S3 | ESP32-C2 | ESP32-C3 | ESP32-C5 | ESP32-C6/C61 |
+| ----------------- | ----- | -------- | -------- | -------- | -------- | -------- | ------------ |
 
 ## 1. Setup
 ### 1.1 Hardware Setup
@@ -76,7 +76,7 @@ Execute `./rpi_init.sh --help` to see the list of options.
 
 #### 2.1.1 Manually loading and unloading the Kernel Module
 
-Once built, the kernel module `esp32_spi.ko` can be found in `esp_hosted_fg/host/linux/host_driver/esp32`. You can manualy load/unload the module as needed.
+Once built, the kernel module `esp32_spi.ko` can be found in `esp_hosted_fg/host/linux/host_driver/esp32`. You can manually load/unload the module as needed.
 
 To add the module:
 
@@ -157,15 +157,19 @@ $ idf.py -p <serial_port> build flash
 $ idf.py -p <serial_port> monitor
 ```
 
-> [!NOTE}
-> For `esp32c2`, To use this configuration, execute
+> [!NOTE]
+> For `esp32c2`,
+> 1. Because of lower RAM availability, Network Split feature is not supported.
+> 2. Further, if you wish to use avoid Bluetooth and use Wi-Fi only on esp32c2,
 >
-> ```sh
-> rm sdkconfig
-> idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32c2.wifionly" menuconfig
-> ```
+> To use this configuration, execute
 >
-> Save the configuration. You can now run `idf.py` with the `build`, `flash` and `monitor` options as per normal.
+
+```sh
+$ rm sdkconfig
+$ idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32c2.wifionly" menuconfig
+$ idf.py -p <serial_port> build flash monitor
+```
 
 ## 3. Checking the Setup
 

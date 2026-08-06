@@ -1,22 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/*
- * Espressif Systems Wireless LAN device driver
- *
- * Copyright (C) 2015-2021 Espressif Systems (Shanghai) PTE LTD
- *
- * This software file (the "File") is distributed by Espressif Systems (Shanghai)
- * PTE LTD under the terms of the GNU General Public License Version 2, June 1991
- * (the "License").  You may use, redistribute and/or modify this File in
- * accordance with the terms and conditions of the License, a copy of which
- * is available by writing to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA or on the
- * worldwide web at http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
- *
- * THE FILE IS DISTRIBUTED AS-IS, WITHOUT WARRANTY OF ANY KIND, AND THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE
- * ARE EXPRESSLY DISCLAIMED.  The License provides additional details about
- * this warranty disclaimer.
- */
+// SPDX-FileCopyrightText: 2015-2026 Espressif Systems (Shanghai) CO LTD
 
 #include <stdio.h>
 #include <sys/types.h>
@@ -32,7 +15,6 @@
 #include <time.h>
 #include "test.h"
 #include "nw_helper_func.h"
-#include "esp_hosted_custom_rpc.h"
 
 /***** Please Read *****/
 /* Before use : User must enter user configuration parameter in "ctrl_config.h" file */
@@ -43,6 +25,58 @@
 /* Global network information structures */
 network_info_t sta_network = {0};
 network_info_t ap_network = {0};
+/* Station-connect result, set by the event callback. */
+volatile int g_sta_conn_result = STA_CONN_PENDING;
+static bool g_run_dhcp_client;
+
+/* Optional helper: wait up to timeout_sec for the connect event so the demo
+ * doesn't exit and leave ethsta0 dangling. Returns STA_CONN_*. */
+int test_wait_sta_connect(int timeout_sec)
+{
+	int waited_ms = 0;
+	while (g_sta_conn_result == STA_CONN_PENDING && waited_ms < timeout_sec * 1000) {
+		usleep(100 * 1000);
+		waited_ms += 100;
+	}
+	return g_sta_conn_result;
+}
+
+void test_set_run_dhcp_client(bool enable)
+{
+	g_run_dhcp_client = enable;
+}
+
+static void start_dhcp_client(void)
+{
+	int ret;
+
+	ret = system("sh -c 'PATH=/sbin:/usr/sbin:/bin:/usr/bin; "
+			"if command -v dhclient >/dev/null 2>&1; then "
+			"dhclient -r ethsta0 >/dev/null 2>&1 || true; "
+			"nohup dhclient -v ethsta0 >/tmp/esp_hosted_dhclient.log 2>&1 & "
+			"elif command -v udhcpc >/dev/null 2>&1; then "
+			"pkill -f \"udhcpc .*ethsta0\" >/dev/null 2>&1 || true; "
+			"nohup udhcpc -i ethsta0 >/tmp/esp_hosted_dhclient.log 2>&1 & "
+			"elif command -v dhcpcd >/dev/null 2>&1; then "
+			"dhcpcd -k ethsta0 >/dev/null 2>&1 || true; "
+			"nohup dhcpcd ethsta0 >/tmp/esp_hosted_dhclient.log 2>&1 & "
+			"elif command -v nmcli >/dev/null 2>&1; then "
+			"nohup nmcli dev connect ethsta0 >/tmp/esp_hosted_dhclient.log 2>&1 & "
+			"else exit 127; fi'");
+	if (ret)
+		printf("Failed to start DHCP client on ethsta0, ret=%d\n", ret);
+	else
+		printf("Started DHCP client on ethsta0\n");
+}
+
+static void stop_dhcp_client(void)
+{
+	system("sh -c 'PATH=/sbin:/usr/sbin:/bin:/usr/bin; "
+			"dhclient -r ethsta0 >/dev/null 2>&1 || true; "
+			"pkill -f \"udhcpc .*ethsta0\" >/dev/null 2>&1 || true; "
+			"dhcpcd -k ethsta0 >/dev/null 2>&1 || true; "
+			"nmcli dev disconnect ethsta0 >/dev/null 2>&1 || true'");
+}
 
 /* Global network status tracking */
 static bool interface_down_printed = false;
@@ -117,25 +151,29 @@ int test_validate_ctrl_event(ctrl_cmd_t *app_event) {
 }
 
 int test_validate_ctrl_resp(ctrl_cmd_t *app_resp) {
-	int ret = SUCCESS;
 
 	if (!app_resp || (app_resp->msg_type != CTRL_RESP)) {
 		if (app_resp)
 			printf("Msg type is not response[%u]\n", app_resp->msg_type);
-		ret = FAILURE;
+		return FAILURE;
 	}
 
-	if (!ret && ((app_resp->msg_id <= CTRL_RESP_BASE) || (app_resp->msg_id >= CTRL_RESP_MAX))) {
+	if (app_resp->msg_id == CTRL_RESP_BASE) {
+		printf("RPC req unsupported at coprocessor at this time, ignoring\n");
+		return FAILURE;
+	}
+
+	if ((app_resp->msg_id < CTRL_RESP_BASE) || (app_resp->msg_id >= CTRL_RESP_MAX)) {
 		printf("Response Msg ID[%u] is not correct\n", app_resp->msg_id);
-		ret = FAILURE;
+		return FAILURE;
 	}
 
-	if (!ret && (app_resp->resp_event_status != SUCCESS)) {
-		printf("Received NACK in response\n");
-		ret = FAILURE;
+	if (app_resp->resp_event_status != SUCCESS) {
+		printf("Received NACK in response for req[%u]\n", app_resp->msg_id-CTRL_RESP_BASE+CTRL_REQ_BASE);
+		return FAILURE;
 	}
 
-	return ret;
+	return SUCCESS;
 }
 
 
@@ -170,14 +208,21 @@ static int ctrl_app_event_callback(ctrl_cmd_t *app_event) {
 			PRINT_IF(!connected_printed, "%s App EVENT: STA-Connected ssid[%s] bssid[%s] channel[%d] auth[%d] aid[%d]\n",
 				get_timestamp(ts, MIN_TIMESTAMP_STR_SIZE), p_e->ssid,
 				p_e->bssid, p_e->channel, p_e->authmode, p_e->aid);
+			if (!test_is_network_split_on()) {
+				if (!g_run_dhcp_client)
+					PRINT_IF(!connected_printed, "Network iface 'ethsta0' Up! You may run 'dhclient -v ethsta0' to get IP address\n\n");
+			}
 			disconnected_printed = false;
 			connected_printed = true;
 			if (sta_network.mac_addr[0] != '\0') {
 				up_sta_netdev(&sta_network);
+				if (!test_is_network_split_on() && g_run_dhcp_client)
+					start_dhcp_client();
 			} else {
 				printf("Interface ethsta0 not made up, as MAC is not set\n");
 				printf("You may consider calling 'test_station_mode_get_mac_addr(sta_network.mac_addr);' to set the STA MAC before\n");
 			}
+			g_sta_conn_result = STA_CONN_CONNECTED;
 			break;
 		} case CTRL_EVENT_STATION_DISCONNECT_FROM_AP: {
 			event_sta_disconn_t *p_e =  &app_event->u.e_sta_disconn;
@@ -185,9 +230,15 @@ static int ctrl_app_event_callback(ctrl_cmd_t *app_event) {
 			PRINT_IF(!disconnected_printed, "%s App EVENT: STA-Disconnected reason[%d] ssid[%s] bssid[%s] rssi[%d]\n",
 				get_timestamp(ts, MIN_TIMESTAMP_STR_SIZE), p_e->reason, p_e->ssid,
 				p_e->bssid, p_e->rssi);
+			if (!test_is_network_split_on()) {
+				PRINT_IF(!disconnected_printed, "Network iface 'ethsta0' Down! You may 'killall dhclient' to stop dhclient process\n\n");
+				if (g_run_dhcp_client)
+					stop_dhcp_client();
+			}
 			disconnected_printed = true;
 			connected_printed = false;
 			down_sta_netdev(&sta_network);
+			g_sta_conn_result = STA_CONN_DISCONNECTED;
 			break;
 		} case CTRL_EVENT_STATION_CONNECTED_TO_ESP_SOFTAP: {
 			event_softap_sta_conn_t *p_e = &app_event->u.e_softap_sta_conn;
@@ -196,7 +247,9 @@ static int ctrl_app_event_callback(ctrl_cmd_t *app_event) {
 				printf("%s App EVENT: SoftAP mode: Connected MAC[%s] aid[%d] is_mesh_child[%d]\n",
 					get_timestamp(ts, MIN_TIMESTAMP_STR_SIZE),
 					p, p_e->aid, p_e->is_mesh_child);
+				printf("Ensure DHCP server is running to prevent station disconnection\n");
 			}
+
 			break;
 		} case CTRL_EVENT_STATION_DISCONNECT_FROM_ESP_SOFTAP: {
 			event_softap_sta_disconn_t *p_e = &app_event->u.e_softap_sta_disconn;
@@ -205,6 +258,77 @@ static int ctrl_app_event_callback(ctrl_cmd_t *app_event) {
 				printf("%s App EVENT: SoftAP mode: Disconnect MAC[%s] reason[%d] aid[%d] is_mesh_child[%d]\n",
 					get_timestamp(ts, MIN_TIMESTAMP_STR_SIZE),
 					p, p_e->reason, p_e->aid, p_e->is_mesh_child);
+			}
+			break;
+		} case CTRL_EVENT_DHCP_DNS_STATUS: {
+			dhcp_dns_status_t *p_e = &app_event->u.dhcp_dns_status;
+
+			if (test_is_network_split_on()) {
+
+				if (!successful_response(app_event)) {
+					printf("Slave firmware not compiled with network split. Ignore (DHCP_DNS event)\n");
+					CLEANUP_CTRL_MSG(app_event);
+					return FAILURE;
+				}
+
+				if (p_e->dhcp_up) {
+					strncpy(sta_network.ip_addr, (const char *)p_e->dhcp_ip, MAC_ADDR_LENGTH);
+					strncpy(sta_network.netmask, (const char *)p_e->dhcp_nm, MAC_ADDR_LENGTH);
+					strncpy(sta_network.gateway, (const char *)p_e->dhcp_gw, MAC_ADDR_LENGTH);
+					strncpy(sta_network.default_route, (const char *)p_e->dhcp_gw, MAC_ADDR_LENGTH);
+					sta_network.ip_valid = 1;
+				} else {
+					sta_network.network_up = 0;
+					sta_network.ip_valid = 0;
+				}
+				if (p_e->dns_up) {
+					strncpy(sta_network.dns_addr, (const char *)p_e->dns_ip, MAC_ADDR_LENGTH);
+					sta_network.dns_valid = 1;
+				} else {
+					sta_network.dns_valid = 0;
+				}
+
+				if (p_e->net_link_up) {
+					PRINT_IF(!interface_up_printed, "%s  network event %s dhcp %s (%s %s %s) dns %s (%s) ===> Configured as static IP\n",
+						get_timestamp(ts, MIN_TIMESTAMP_STR_SIZE),
+						p_e->net_link_up ? "up" : "down",
+						p_e->dhcp_up ? "up" : "down",
+						p_e->dhcp_ip, p_e->dhcp_nm, p_e->dhcp_gw,
+						p_e->dns_up ? "up" : "down",
+						p_e->dns_ip);
+					interface_up_printed = true;
+					interface_down_printed = false;
+				} else {
+					/* Only print network down message if we haven't already */
+					PRINT_IF(!interface_down_printed, "%s  network event %s ===> Interface would be brought down\n",
+						get_timestamp(ts, MIN_TIMESTAMP_STR_SIZE),
+						p_e->net_link_up ? "up" : "down");
+					interface_up_printed = false;
+					interface_down_printed = true;
+				}
+
+				if (sta_network.dns_valid && sta_network.ip_valid) {
+					//printf("Network identified as up\n");
+					if (sta_network.mac_addr[0] != '\0') {
+						up_sta_netdev__with_static_ip_dns_route(&sta_network);
+						add_dns(sta_network.dns_addr);
+						sta_network.network_up = 1;
+					} else {
+						printf("Event ignored as 'ethsta0' yet not assigned MAC\n");
+						printf("You may consider calling 'test_station_mode_get_mac_addr(sta_network.mac_addr);' to set the STA MAC before\n");
+					}
+				} else {
+					//printf("Network identified as down");
+					/* Only print interface down message if we haven't already */
+
+					down_sta_netdev(&sta_network);
+					remove_dns(sta_network.dns_addr);
+					sta_network.network_up = 0;
+				}
+
+			} else {
+				printf("Network split[%d] is disabled. So ignoring the DHCP_DNS event\n",
+					test_is_network_split_on());
 			}
 			break;
 		} case CTRL_EVENT_CUSTOM_RPC_UNSERIALISED_MSG: {
@@ -305,6 +429,12 @@ static void process_failed_responses(ctrl_cmd_t *app_msg)
 			printf("Failed to start SoftAP\n");
 			break;
 		}
+
+		case CTRL_RESP_SET_DHCP_DNS_STATUS:
+		case CTRL_RESP_GET_DHCP_DNS_STATUS: {
+			printf("Possibly network is not up\n");
+			break;
+		}
 		case CTRL_RESP_STOP_SOFTAP:
 		case CTRL_RESP_GET_SOFTAP_CONFIG: {
 			printf("Possibly softap is not running/started\n");
@@ -342,6 +472,7 @@ int register_event_callbacks(void)
 		{ CTRL_EVENT_STATION_DISCONNECT_FROM_AP,         ctrl_app_event_callback },
 		{ CTRL_EVENT_STATION_CONNECTED_TO_ESP_SOFTAP,    ctrl_app_event_callback },
 		{ CTRL_EVENT_STATION_DISCONNECT_FROM_ESP_SOFTAP, ctrl_app_event_callback },
+		{ CTRL_EVENT_DHCP_DNS_STATUS,                    ctrl_app_event_callback },
 		{ CTRL_EVENT_CUSTOM_RPC_UNSERIALISED_MSG,        ctrl_app_event_callback },
 	};
 
@@ -354,6 +485,7 @@ int register_event_callbacks(void)
 	}
 	return ret;
 }
+
 static int get_event_id(const char *event)
 {
 	int event_id = 0;
@@ -369,13 +501,41 @@ static int get_event_id(const char *event)
 		event_id = CTRL_EVENT_STATION_CONNECTED_TO_ESP_SOFTAP;
 	} else if (strcmp(event, "softap_sta_disconnected") == 0) {
 		event_id = CTRL_EVENT_STATION_DISCONNECT_FROM_ESP_SOFTAP;
+	} else if (strcmp(event, "dhcp_dns_status") == 0) {
+		event_id = CTRL_EVENT_DHCP_DNS_STATUS;
 	} else if (strcmp(event, "custom_rpc_event") == 0) {
 		event_id = CTRL_EVENT_CUSTOM_RPC_UNSERIALISED_MSG;
+	} else if (strcmp(event, "all") == 0) {
+				event_id = -2;   // Special case for "all"
 	} else {
 		printf("Invalid event: %s\n", event);
 		return FAILURE;
 	}
 	return event_id;
+}
+
+static const char *get_event_string(int event_id)
+{
+    switch (event_id) {
+        case CTRL_EVENT_ESP_INIT:
+            return "esp_init";
+        case CTRL_EVENT_HEARTBEAT:
+            return "heartbeat";
+        case CTRL_EVENT_STATION_CONNECTED_TO_AP:
+            return "sta_connected";
+        case CTRL_EVENT_STATION_DISCONNECT_FROM_AP:
+            return "sta_disconnected";
+        case CTRL_EVENT_STATION_CONNECTED_TO_ESP_SOFTAP:
+            return "softap_sta_connected";
+        case CTRL_EVENT_STATION_DISCONNECT_FROM_ESP_SOFTAP:
+            return "softap_sta_disconnected";
+        case CTRL_EVENT_DHCP_DNS_STATUS:
+            return "dhcp_dns_status";
+        case CTRL_EVENT_CUSTOM_RPC_UNSERIALISED_MSG:
+            return "custom_rpc_event";
+        default:
+            return "unknown";
+    }
 }
 
 int test_subscribe_event(const char *event)
@@ -384,6 +544,31 @@ int test_subscribe_event(const char *event)
 	if (event_id == FAILURE) {
 		return FAILURE;
 	}
+
+    if (event_id == -2) { // special case: "all"
+        int ret = SUCCESS;
+        int all_events[] = {
+            CTRL_EVENT_ESP_INIT,
+            CTRL_EVENT_HEARTBEAT,
+            CTRL_EVENT_STATION_CONNECTED_TO_AP,
+            CTRL_EVENT_STATION_DISCONNECT_FROM_AP,
+            CTRL_EVENT_STATION_CONNECTED_TO_ESP_SOFTAP,
+            CTRL_EVENT_STATION_DISCONNECT_FROM_ESP_SOFTAP,
+            CTRL_EVENT_DHCP_DNS_STATUS,
+            CTRL_EVENT_CUSTOM_RPC_UNSERIALISED_MSG,
+        };
+        size_t count = sizeof(all_events) / sizeof(all_events[0]);
+        for (size_t i = 0; i < count; i++) {
+            printf("[SUBSCRIBE] Event: %s (%d)\n", get_event_string(all_events[i]), all_events[i]);
+            if (set_event_callback(all_events[i], ctrl_app_event_callback) != SUCCESS) {
+                printf("  -> Failed to subscribe %s\n", get_event_string(all_events[i]));
+                ret = FAILURE;
+            }
+        }
+        return ret;
+    }
+
+    printf("[SUBSCRIBE] Event: %s (%d)\n", get_event_string(event_id), event_id);
 	return set_event_callback(event_id, ctrl_app_event_callback);
 }
 
@@ -393,6 +578,31 @@ int test_unsubscribe_event(const char *event)
 	if (event_id == FAILURE) {
 		return FAILURE;
 	}
+
+    if (event_id == -2) { // special case: "all"
+        int ret = SUCCESS;
+        int all_events[] = {
+            CTRL_EVENT_ESP_INIT,
+            CTRL_EVENT_HEARTBEAT,
+            CTRL_EVENT_STATION_CONNECTED_TO_AP,
+            CTRL_EVENT_STATION_DISCONNECT_FROM_AP,
+            CTRL_EVENT_STATION_CONNECTED_TO_ESP_SOFTAP,
+            CTRL_EVENT_STATION_DISCONNECT_FROM_ESP_SOFTAP,
+            CTRL_EVENT_DHCP_DNS_STATUS,
+            CTRL_EVENT_CUSTOM_RPC_UNSERIALISED_MSG,
+        };
+        size_t count = sizeof(all_events) / sizeof(all_events[0]);
+        for (size_t i = 0; i < count; i++) {
+            printf("[UNSUBSCRIBE] Event: %s (%d)\n", get_event_string(all_events[i]), all_events[i]);
+            if (reset_event_callback(all_events[i]) != SUCCESS) {
+                printf("  -> Failed to unsubscribe %s\n", get_event_string(all_events[i]));
+                ret = FAILURE;
+            }
+        }
+        return ret;
+    }
+
+    printf("[UNSUBSCRIBE] Event: %s (%d)\n", get_event_string(event_id), event_id);
 	return reset_event_callback(event_id);
 }
 
@@ -462,6 +672,8 @@ int ctrl_app_resp_callback(ctrl_cmd_t * app_resp)
 				printf("AP's rssi %d\n", p->rssi);
 				printf("AP's encryption mode %d\n", p->encryption_mode);
 				printf("AP's band mode %d\n", p->band_mode);
+				printf("STA link bandwidth %d (1=HT20, 2=HT40, 0=unset)\n", p->bandwidth);
+				printf("STA PHY protocol bitmap 0x%x (0x4=11n 0x40=11ax 0x20=11ac)\n", p->protocol);
 			} else {
 				printf("Station mode status: %s\n",p->status);
 			}
@@ -488,6 +700,7 @@ int ctrl_app_resp_callback(ctrl_cmd_t * app_resp)
 			printf("softAP ssid broadcast status %d \n", resp_p->ssid_hidden);
 			printf("softAP bandwidth mode %d \n", resp_p->bandwidth);
 			printf("softAP band mode %d \n", resp_p->band_mode);
+			printf("softAP PHY protocol bitmap 0x%x (0x4=11n 0x40=11ax 0x20=11ac)\n", resp_p->protocol);
 
 			break;
 		} case CTRL_RESP_SET_SOFTAP_VND_IE : {
@@ -577,6 +790,9 @@ int ctrl_app_resp_callback(ctrl_cmd_t * app_resp)
 			break;
 		} case CTRL_RESP_GET_COUNTRY_CODE: {
 			printf("Current Country code is %s\n", app_resp->u.country_code.country);
+			break;
+		} case CTRL_RESP_GET_DHCP_DNS_STATUS: {
+			//printf("Response for Get DHCP DNS Status received\n");
 			break;
 		} case CTRL_RESP_CUSTOM_RPC_UNSERIALISED_MSG: {
 			printf("Default handler for custom RPC response id[%u] data len[%u] data: \n",
@@ -769,6 +985,8 @@ int test_async_station_mode_connect(void)
 	req->u.wifi_ap_config.is_wpa3_supported = STATION_MODE_IS_WPA3_SUPPORTED;
 	req->u.wifi_ap_config.listen_interval = STATION_MODE_LISTEN_INTERVAL;
 	req->u.wifi_ap_config.band_mode = STATION_BAND_MODE;
+	req->u.wifi_ap_config.bandwidth = STATION_MODE_BANDWIDTH;
+	req->u.wifi_ap_config.protocol = STATION_MODE_PROTOCOL;
 
 	/* register callback for handling asynch reply */
 	req->ctrl_resp_cb = ctrl_app_resp_callback;
@@ -804,6 +1022,8 @@ int test_station_mode_connect(void)
 	req->u.wifi_ap_config.is_wpa3_supported = STATION_MODE_IS_WPA3_SUPPORTED;
 	req->u.wifi_ap_config.listen_interval = STATION_MODE_LISTEN_INTERVAL;
 	req->u.wifi_ap_config.band_mode = STATION_BAND_MODE;
+	req->u.wifi_ap_config.bandwidth = STATION_MODE_BANDWIDTH;
+	req->u.wifi_ap_config.protocol = STATION_MODE_PROTOCOL;
 
 	connected_printed = false;
 	disconnected_printed = false;
@@ -880,6 +1100,7 @@ int test_softap_mode_start(void)
 	req->u.wifi_softap_config.ssid_hidden = SOFTAP_MODE_SSID_HIDDEN;
 	req->u.wifi_softap_config.bandwidth = SOFTAP_MODE_BANDWIDTH;
 	req->u.wifi_softap_config.band_mode = SOFTAP_BAND_MODE;
+	req->u.wifi_softap_config.protocol = SOFTAP_MODE_PROTOCOL;
 
 	resp = wifi_start_softap(req);
 
@@ -1298,6 +1519,40 @@ int test_disable_wifi(void)
 	return ctrl_app_resp_callback(resp);
 }
 
+int test_is_network_split_on(void) {
+	/* This way of usage of API is mandatory NEED to be synchronous */
+
+	static int queried_network_split_on = 0;
+	static int is_network_split_on = 0;
+
+	if (queried_network_split_on) {
+		return is_network_split_on;
+	}
+
+	/* Please note: This API at least need to be called once to cache the network split status
+	   because it is a synchronous API and it will block the execution of the program.
+	   So, we need to call this API at least once before using in any async APIs, like event callbacks.
+	*/
+
+	ctrl_cmd_t *resp = NULL;
+	ctrl_cmd_t *req = CTRL_CMD_DEFAULT_REQ();
+
+	req->u.feat_ena_disable.feature = HOSTED_IS_NETWORK_SPLIT_ON;
+	resp = feature_config(req);
+
+	queried_network_split_on = 1;
+	if (resp && resp->resp_event_status == SUCCESS) {
+		is_network_split_on = 1;
+	} else {
+		is_network_split_on = 0;
+	}
+
+	CLEANUP_CTRL_MSG(req);
+	CLEANUP_CTRL_MSG(resp);
+
+	return is_network_split_on;
+}
+
 
 #include <sys/ioctl.h>
 #include <net/if.h>
@@ -1333,8 +1588,19 @@ int test_enable_bt(void)
 
 	resp = feature_config(req);
 
-	if (successful_response(resp))
+	if (successful_response(resp)) {
+		/* BT controller needs ~1s to fully init (PHY cal, etc.)
+		 * before HCI reset will succeed. Retry up to 3 times. */
+		int retry;
+		for (retry = 0; retry < 3; retry++) {
+			usleep(1000 * 1000); /* 1 second */
 		reset_hci_instance();
+			/* Check if HCI came up */
+			if (system("hciconfig hci0 2>/dev/null | grep -q 'UP RUNNING'") == 0)
+				break;
+			printf("HCI not ready yet, retrying... (%d/3)\n", retry + 1);
+		}
+	}
 
 	CLEANUP_CTRL_MSG(req);
 	return ctrl_app_resp_callback(resp);
@@ -1402,6 +1668,114 @@ int test_print_fw_version(void)
 	return 0;
 }
 
+int test_fetch_ip_addr_from_slave(void)
+{
+	if (test_is_network_split_on()) {
+		ctrl_cmd_t *resp = NULL;
+		ctrl_cmd_t *req = CTRL_CMD_DEFAULT_REQ();
+		req->cmd_timeout_sec = 5;
+
+		resp = get_dhcp_dns_status(req);
+
+		CLEANUP_CTRL_MSG(req);
+		if (successful_response(resp)) {
+			dhcp_dns_status_t *p = &resp->u.dhcp_dns_status;
+			if (p->dhcp_up) {
+				PRINT_IF(!interface_up_printed, "%s -> Network UP [IP: %s NM: %s GW: %s", STA_INTERFACE, p->dhcp_ip, p->dhcp_nm, p->dhcp_gw);
+				strncpy(sta_network.ip_addr, (const char *)p->dhcp_ip, MAC_ADDR_LENGTH);
+				strncpy(sta_network.netmask, (const char *)p->dhcp_nm, MAC_ADDR_LENGTH);
+				strncpy(sta_network.gateway, (const char *)p->dhcp_gw, MAC_ADDR_LENGTH);
+				strncpy(sta_network.default_route, (const char *)p->dhcp_gw, MAC_ADDR_LENGTH);
+				sta_network.ip_valid = 1;
+
+				interface_up_printed = true;
+				interface_down_printed = false;
+			} else {
+				/* Only print message if this is the first time we're reporting network down */
+				PRINT_IF(!interface_down_printed, "%s -> Network down\n", STA_INTERFACE);
+				interface_down_printed = true;
+				interface_up_printed = false;
+				sta_network.network_up = 0;
+				sta_network.ip_valid = 0;
+			}
+			if (p->dns_up) {
+				printf(" DNS: %s]\n", p->dns_ip);
+				strncpy(sta_network.dns_addr, (const char *)p->dns_ip, MAC_ADDR_LENGTH);
+				sta_network.dns_valid = 1;
+			} else {
+				//printf("DNS is not up");
+				sta_network.dns_valid = 0;
+			}
+
+			if (resp->u.dhcp_dns_status.dns_up && resp->u.dhcp_dns_status.dhcp_up) {
+				//printf("Network identified as up");
+				up_sta_netdev__with_static_ip_dns_route(&sta_network);
+				add_dns(sta_network.dns_addr);
+				sta_network.network_up = 1;
+			} else {
+				//printf("Network identified as down");
+				/* Only print message if this is the first time we're bringing down the interface */
+				if (!interface_down_printed) {
+					printf("%s interface down\n", STA_INTERFACE);
+					interface_down_printed = true;
+				}
+
+				down_sta_netdev(&sta_network);
+				remove_dns(sta_network.dns_addr);
+				sta_network.network_up = 0;
+			}
+		} else {
+			//printf("Slave not built with network split\n");
+			CLEANUP_CTRL_MSG(resp);
+			return FAILURE;
+		}
+
+		return ctrl_app_resp_callback(resp);
+	} else {
+		printf("Network split is disabled at host. So not fetching IP address from slave\n");
+		return FAILURE;
+	}
+}
+
+int test_set_dhcp_dns_status(char *sta_ip, char *sta_nm, char *sta_gw, char *sta_dns)
+{
+	if (test_is_network_split_on()) {
+		ctrl_cmd_t *resp = NULL;
+
+		if (!sta_ip || !sta_nm || !sta_gw || !sta_dns) {
+			printf("Invalid parameters\n");
+			return FAILURE;
+		}
+
+		ctrl_cmd_t *req = CTRL_CMD_DEFAULT_REQ();
+		req->cmd_timeout_sec = 5;
+
+		req->u.dhcp_dns_status.iface = 0;
+		req->u.dhcp_dns_status.dhcp_up = 1;
+		req->u.dhcp_dns_status.dns_up = 1;
+
+		strncpy((char *)req->u.dhcp_dns_status.dhcp_ip, sta_ip, MAC_ADDR_LENGTH);
+		strncpy((char *)req->u.dhcp_dns_status.dhcp_nm, sta_nm, MAC_ADDR_LENGTH);
+		strncpy((char *)req->u.dhcp_dns_status.dhcp_gw, sta_gw, MAC_ADDR_LENGTH);
+		strncpy((char *)req->u.dhcp_dns_status.dns_ip, sta_dns, MAC_ADDR_LENGTH);
+
+		resp = set_dhcp_dns_status(req);
+
+		CLEANUP_CTRL_MSG(req);
+
+		if (!successful_response(resp)) {
+			//printf("Slave not built with network split\n");
+			CLEANUP_CTRL_MSG(resp);
+			return FAILURE;
+		}
+
+		return ctrl_app_resp_callback(resp);
+	} else {
+		printf("Network split is disabled at host. So not setting DHCP/DNS status\n");
+		return FAILURE;
+	}
+}
+
 int test_softap_mode_set_vendor_ie(bool enable, const char *data) {
 	/* implemented synchronous */
 	ctrl_cmd_t *req = CTRL_CMD_DEFAULT_REQ();
@@ -1442,7 +1816,7 @@ int test_softap_mode_set_vendor_ie(bool enable, const char *data) {
 
 /* Updated connect function with parameters */
 int test_station_mode_connect_with_params(const char *ssid, const char *pwd, const char *bssid,
-		bool use_wpa3, int listen_interval, int band_mode)
+		bool use_wpa3, int listen_interval, int band_mode, int bandwidth, int protocol)
 {
 	ctrl_cmd_t *req = CTRL_CMD_DEFAULT_REQ();
 	ctrl_cmd_t *resp = NULL;
@@ -1462,6 +1836,8 @@ int test_station_mode_connect_with_params(const char *ssid, const char *pwd, con
 	req->u.wifi_ap_config.is_wpa3_supported = use_wpa3 ? 1 : STATION_MODE_IS_WPA3_SUPPORTED;
 	req->u.wifi_ap_config.listen_interval = listen_interval ? listen_interval : STATION_MODE_LISTEN_INTERVAL;
 	req->u.wifi_ap_config.band_mode = band_mode ? band_mode : STATION_BAND_MODE;
+	req->u.wifi_ap_config.bandwidth = bandwidth;
+	req->u.wifi_ap_config.protocol = protocol;
 
     connected_printed = false;
     disconnected_printed = false;
@@ -1500,7 +1876,7 @@ int test_station_mode_disconnect_with_params(bool reset_dhcp)
 /* Updated softap start function with parameters */
 int test_softap_mode_start_with_params(const char *ssid, const char *pwd, int channel,
 		const char *sec_prot, int max_conn, bool hide_ssid,
-		int bw, int band_mode)
+		int bw, int band_mode, int protocol)
 {
 	/* implemented synchronous */
 	ctrl_cmd_t *req = CTRL_CMD_DEFAULT_REQ();
@@ -1535,6 +1911,7 @@ int test_softap_mode_start_with_params(const char *ssid, const char *pwd, int ch
 	req->u.wifi_softap_config.ssid_hidden = hide_ssid ? 1 : SOFTAP_MODE_SSID_HIDDEN;
 	req->u.wifi_softap_config.bandwidth = bw ? bw : SOFTAP_MODE_BANDWIDTH;
 	req->u.wifi_softap_config.band_mode = band_mode ? band_mode : SOFTAP_BAND_MODE;
+	req->u.wifi_softap_config.protocol = protocol;
 
 	resp = wifi_start_softap(req);
 	CLEANUP_CTRL_MSG(req);
@@ -1644,6 +2021,43 @@ int test_set_mac_addr_with_params(int mode, const char *mac) {
 	resp = wifi_set_mac(req);
 	CLEANUP_CTRL_MSG(req);
 	return ctrl_app_resp_callback(resp);
+}
+
+int test_set_dhcp_dns_status_with_params(char *sta_ip, char *sta_nm, char *sta_gw, char *sta_dns) {
+	if (test_is_network_split_on()) {
+		/* implemented synchronous */
+		ctrl_cmd_t *req = CTRL_CMD_DEFAULT_REQ();
+		ctrl_cmd_t *resp = NULL;
+
+		if (!sta_ip || !sta_nm || !sta_gw || !sta_dns) {
+			printf("Invalid parameters\n");
+			return FAILURE;
+		}
+
+		req->u.dhcp_dns_status.iface = 0;
+		req->u.dhcp_dns_status.dhcp_up = 1;
+		req->u.dhcp_dns_status.dns_up = 1;
+
+		strncpy((char *)req->u.dhcp_dns_status.dhcp_ip, sta_ip, MAC_ADDR_LENGTH);
+		strncpy((char *)req->u.dhcp_dns_status.dhcp_nm, sta_nm, MAC_ADDR_LENGTH);
+		strncpy((char *)req->u.dhcp_dns_status.dhcp_gw, sta_gw, MAC_ADDR_LENGTH);
+		strncpy((char *)req->u.dhcp_dns_status.dns_ip, sta_dns, MAC_ADDR_LENGTH);
+
+		resp = set_dhcp_dns_status(req);
+
+		CLEANUP_CTRL_MSG(req);
+
+		if (!successful_response(resp)) {
+			//printf("Slave not built with network split\n");
+			CLEANUP_CTRL_MSG(resp);
+			return FAILURE;
+		}
+
+		return ctrl_app_resp_callback(resp);
+	} else {
+		printf("Network split is disabled at host. So not setting DHCP/DNS status\n");
+		return FAILURE;
+	}
 }
 
 int test_set_vendor_specific_ie_with_params(bool enable, const char *data) {

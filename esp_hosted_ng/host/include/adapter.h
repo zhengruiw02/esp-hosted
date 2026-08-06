@@ -44,6 +44,16 @@ struct esp_payload_header {
 	/* Do no add anything here */
 } __packed;
 
+/* Maximum alignment padding required for DMA */
+#define ESP_MAX_ALIGN_PADDING           4
+
+/* Maximum offset = header size (12) + max DMA alignment padding (4) */
+#define ESP_MAX_OFFSET_SIZE             (sizeof(struct esp_payload_header) + ESP_MAX_ALIGN_PADDING)
+
+/* Validate offset: must be >= header size and <= ESP_MAX_OFFSET_SIZE */
+#define ESP_OFFSET_VALID(offset) \
+	((offset) >= sizeof(struct esp_payload_header) && (offset) <= ESP_MAX_OFFSET_SIZE)
+
 struct ieee_mgmt_header {
 	uint16_t   frame_control;
 	uint16_t   dur;
@@ -113,6 +123,7 @@ enum ESP_BOOTUP_TAG_TYPE {
 	ESP_BOOTUP_SPI_CLK_MHZ,
 	ESP_BOOTUP_FIRMWARE_CHIP_ID,
 	ESP_BOOTUP_TEST_RAW_TP,
+	ESP_BOOTUP_RX_BUF_SIZE,
 };
 
 enum COMMAND_CODE {

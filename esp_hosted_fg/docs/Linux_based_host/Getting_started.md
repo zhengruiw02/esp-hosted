@@ -22,6 +22,8 @@
     - [3.2.4 1M, 2M, CODED phy for LE](#324-1m-2m-coded-phy-for-le)
 - [4. OTA operation](#4-ota-operation)
 - [5. Troubleshoot Instructions](#5-troubleshoot-instructions)
+- [6. Network Split](#6-network-split)
+- [7. Auto Network Setup](#7-auto-network-setup)
 </details>
 
 \
@@ -152,7 +154,7 @@ $ cd esp_hosted_fg/host/linux/host_control/python_support/
 
 ## 3. Bluetooth/BLE Connectivity
 
-* Ensure that BlueZ and related dependency softwares (mentioned [earlier](Linux_based_readme.md#12-host-setup)) are installed on the host
+* Ensure that BlueZ and related dependency software (mentioned [earlier](Linux_based_readme.md#12-host-setup)) are installed on the host
 * BlueZ is example Bluetooth stack used, as it is generally available in Linux. Any other Bluetooth stack can also be used.
 * In following test, Android device was used as a BT/BLE test device. For BLE testing, [nRF connect for mobile APP](https://play.google.com/store/apps/details?id=no.nordicsemi.android.mcp&hl=en_IN) was used.
 * Ensure that `hci0` interface is visible. To check that, run `hciconfig`.
@@ -183,7 +185,7 @@ Perform below steps on Mobile Phone:
 6. Turn on mobile phone's bluetooth. Open nRF connect application, ESP's MAC address will be displayed under `SCANNER` tab as a result of scan.
 7. Click on connect. Client tab will be open. Click on `Generic Attribute` option.
 8. Perform read/write on listed characteristics fields in `Generic Attribute` service.
-To disconnet:
+To disconnect:
 9. Run `disconnect <MAC_ADDRESS_of_gatt_client>` on linux host's `bluetoothctrl` OR click on `DISCONNECT` in nRF connect application's `GATT client` screen.
 
 #### 3.1.2 GATT Client
@@ -256,14 +258,14 @@ Steps:
 
 #### 3.2.2 GATT Server
 
-BLE 5.X has backword compability. It can connect with BLE4.2 devices.
+BLE 5.X has backward compatibility. It can connect with BLE4.2 devices.
 Below example demonstrate linux host as GATT server and mobile phone as GATT client. We are using `nRF connect` application for GATT client operartion.
 
 Follow section [3.1.1](#311-gatt-server) for GATT server connections.
 
 #### 3.2.3 GATT client
 
-BLE 5.X has backword compability. It can connect with BLE4.2 devices.
+BLE 5.X has backward compatibility. It can connect with BLE4.2 devices.
 Below example demonstrate linux host as GATT client and mobile phone as GATT server. We are using `nRF connect` application for GATT server operartion.
 
 Follow section [3.1.2](#312-gatt-client) for GATT client connections.
@@ -321,3 +323,26 @@ Please follow [OTA update documentation](ota_update.md) for further details.
 Please refer following for troubleshoot instructions if something goes wrong.
 
 * [Troubleshooting Guide](./Troubleshoot.md)
+
+
+## 6. Network Split
+
+Network Split enables host and ESP to share an IP address while handling traffic based on port ranges. Users benefit from continued ESP connectivity during host sleep/power-down and can customize network configuration between slave and host.
+
+Key features:
+- Port-based traffic splitting (host: 49152-61439, ESP: 61440-65535)
+- Intelligent packet filtering with Deep Packet Inspection
+- Special handling for wake-up events
+
+For details, see [Network Split documentation](Network_Split.md).
+
+## 7. Auto Network Setup
+
+Auto Network Setup automatically retrieves and applies network settings from ESP to host, eliminating manual reconfiguration after reboots or sleep cycles and saving users time with seamless connectivity.
+
+Key benefits:
+- No manual IP setup required
+- Fast connectivity on boot or wake-up
+- Background daemon support
+
+For details, see [Auto Network Setup documentation](Auto_Network_Setup.md).

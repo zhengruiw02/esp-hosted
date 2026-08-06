@@ -73,7 +73,8 @@ static int host_rcv_pkt(uint8_t *data, uint16_t len)
 #if CONFIG_ESP_BT_DEBUG
     ESP_LOG_BUFFER_HEXDUMP("bt_tx", data, len, ESP_LOG_INFO);
 #endif
-    ret = xQueueSend(to_host_queue[PRIO_Q_MID], &buf_handle, portMAX_DELAY);
+    /* Use the common enqueue helper so a sleeping send_task is notified. */
+    ret = send_to_host(PRIO_Q_MID, &buf_handle);
 
     if (ret != pdTRUE) {
         ESP_LOGE(BT_TAG, "HCI send packet: Failed to send buffer\n");
@@ -92,7 +93,7 @@ static esp_vhci_host_callback_t vhci_host_cb = {
 void process_hci_rx_pkt(uint8_t *payload, uint16_t payload_len)
 {
     /* VHCI needs one extra byte at the start of payload */
-    /* that is accomodated in esp_payload_header */
+    /* that is accommodated in esp_payload_header */
 #if CONFIG_ESP_BT_DEBUG
     ESP_LOG_BUFFER_HEXDUMP("bt_rx", payload, payload_len, ESP_LOG_INFO);
 #endif
@@ -374,10 +375,10 @@ static void init_uart(void)
              BT_TX_PIN, BT_RX_PIN, BT_RTS_PIN, BT_CTS_PIN);
 
 }
-#elif defined(CONFIG_IDF_TARGET_ESP32C2) || defined(CONFIG_IDF_TARGET_ESP32C6) || defined(CONFIG_IDF_TARGET_ESP32C5)
+#elif defined(CONFIG_IDF_TARGET_ESP32C2) || defined(CONFIG_IDF_TARGET_ESP32C6) || defined(CONFIG_IDF_TARGET_ESP32C5) || defined(CONFIG_IDF_TARGET_ESP32C61)
 static void init_uart(void)
 {
-    ESP_LOGD(BT_TAG, "Set-up BLE for ESP32-C2/C5/C6");
+    ESP_LOGD(BT_TAG, "Set-up BLE for ESP32-C2/C5/C6/C61");
 
     ESP_LOGI(BT_TAG, "UART Pins: Tx:%u Rx:%u", BT_TX_PIN, BT_RX_PIN);
 }

@@ -1,22 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/*
- * Espressif Systems Wireless LAN device driver
- *
- * Copyright (C) 2015-2021 Espressif Systems (Shanghai) PTE LTD
- *
- * This software file (the "File") is distributed by Espressif Systems (Shanghai)
- * PTE LTD under the terms of the GNU General Public License Version 2, June 1991
- * (the "License").  You may use, redistribute and/or modify this File in
- * accordance with the terms and conditions of the License, a copy of which
- * is available by writing to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA or on the
- * worldwide web at http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
- *
- * THE FILE IS DISTRIBUTED AS-IS, WITHOUT WARRANTY OF ANY KIND, AND THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE
- * ARE EXPRESSLY DISCLAIMED.  The License provides additional details about
- * this warranty disclaimer.
- */
+// SPDX-FileCopyrightText: 2015-2026 Espressif Systems (Shanghai) CO LTD
 
 
 #include "test.h"
@@ -24,10 +7,10 @@
 #include <signal.h>
 #include <linux/if.h>
 #include <linux/if_arp.h>
-#include "esp_hosted_custom_rpc.h"
-#include "app_custom_rpc.h"
+#include "app_peer_data_transfer.h"
 
 #define DEMO_SLEEP_DURATION_SEC 50
+#define STA_CONNECT_WAIT_SEC    20
 
  /* Heartbeat demo needs to wait for events
   * For simplicity, we disable heartbeat demo
@@ -46,25 +29,40 @@
 
 static void inline usage(char *argv[])
 {
-	printf("sudo %s \n[\n %s\t\t||\n %s\t\t||\n %s\t\t||\n %s\t\t||\n %s\t\t||\n %s\t\t\t||\n %s\t\t\t||\n %s\t\t\t||\n %s\t\t\t||\n %s\t\t\t||\n %s\t\t||\n %s\t\t||\n %s\t\t\t||\n %s\t\t||\n %s\t||\n %s\t\t\t||\n %s\t||\n %s\t||\n %s\t\t||\n %s\t\t||\n %s <ESP 'network_adapter.bin' path> ||\n %s\t\t\t||\n %s\t\t\t||\n %s\t\t\t||\n %s\t\t\t||\n %s\t\t\t||\n %s\t\t||\n %s\t||\n %s\t\t||\n]\n||\n %s\t||\n %s\t||\n %s\t]\n",
+	printf("sudo %s \n[\n %s\t\t||\n %s\t\t||\n %s\t\t||\n %s\t\t||\n %s\t\t||\n %s\t\t\t||\n %s\t\t\t||\n %s\t\t\t||\n %s\t\t\t||\n %s\t\t\t||\n %s\t\t||\n %s\t\t||\n %s\t\t\t||\n %s\t\t||\n %s\t||\n %s\t\t\t||\n %s\t||\n %s\t||\n %s\t\t||\n %s\t\t||\n %s <ESP 'network_adapter.bin' path> ||\n %s\t\t\t||\n %s\t\t\t||\n %s\t\t\t||\n %s\t\t\t||\n %s\t\t\t||\n %s\t\t||\n %s\t||\n %s\t\t||\n]\n||\n %s\t]\n",
 		argv[0], SET_STA_MAC_ADDR, GET_STA_MAC_ADDR, SET_SOFTAP_MAC_ADDR, GET_SOFTAP_MAC_ADDR, GET_AP_SCAN_LIST,
 		STA_CONNECT, GET_STA_CONFIG, STA_DISCONNECT, SET_WIFI_MODE, GET_WIFI_MODE,
 		RESET_SOFTAP_VENDOR_IE, SET_SOFTAP_VENDOR_IE, SOFTAP_START, GET_SOFTAP_CONFIG, SOFTAP_CONNECTED_STA_LIST,
 		SOFTAP_STOP, SET_WIFI_POWERSAVE_MODE, GET_WIFI_POWERSAVE_MODE, SET_WIFI_MAX_TX_POWER, GET_WIFI_CURR_TX_POWER,
 		OTA, ENABLE_WIFI, DISABLE_WIFI, ENABLE_BT, DISABLE_BT, GET_FW_VERSION, SET_COUNTRY_CODE, SET_COUNTRY_CODE_ENABLED,
-		GET_COUNTRY_CODE,  CUSTOM_RPC_DEMO1, CUSTOM_RPC_DEMO2, CUSTOM_RPC_DEMO3);
+		GET_COUNTRY_CODE,  PEER_DATA_EXAMPLE);
 	printf("\n\nFor example, \nsudo %s %s\n",
 		argv[0], SET_STA_MAC_ADDR);
 }
 /* forward declaration of functions used */
-static int demo1_custom_rpc_unserialised_request_only_ack(void);
-static int demo2_custom_rpc_unserialised_request_and_slave_echo_back_as_response(void);
-static int demo3_custom_rpc_unserialised_request_and_slave_echo_back_as_event(void);
+static int run_peer_data_example(void);
+
+/* sta_connect [ssid] [pwd] [2.4G|5G] : args optional (no args = compiled defaults).
+ * main() blocks on the STA-Connected event afterward (unless --non-blocking). */
+static int sta_connect_cli(char *args[])
+{
+	if (!args || !args[0])
+		return test_station_mode_connect();          /* compiled defaults */
+	const char *ssid = args[0];
+	const char *pwd  = args[1] ? args[1] : "";
+	int band = STATION_BAND_MODE;                        /* auto */
+	if (args[1] && args[2]) {
+		if (!strcasecmp(args[2], "2.4G") || !strcasecmp(args[2], "2.4")) band = 1;  /* 2G only */
+		else if (!strcasecmp(args[2], "5G")  || !strcasecmp(args[2], "5"))  band = 2;  /* 5G only */
+	}
+	printf("Connect to AP[%s] band_mode[%d]\n", ssid, band);
+	return test_station_mode_connect_with_params(ssid, pwd, "", false, 0, band, 0, 0);
+}
 
 static int parse_cli_cmd(char *in_cmd, char *args[])
 {
 	bool cmd_executed = false;
-	char *mac_address = NULL;
+	char mac_address[MAX_MAC_STR_SIZE] = {0};
 
 	/* TODO: create commands and handler map later */
 	/* Get and set mac address */
@@ -73,7 +71,7 @@ static int parse_cli_cmd(char *in_cmd, char *args[])
 	EXEC_IF_CMD_EQUALS(SET_SOFTAP_MAC_ADDR, test_softap_mode_set_mac_addr_of_esp(SOFTAP_MODE_MAC_ADDRESS));
 	EXEC_IF_CMD_EQUALS(GET_SOFTAP_MAC_ADDR, test_softap_mode_get_mac_addr(mac_address));
 	EXEC_IF_CMD_EQUALS(GET_AP_SCAN_LIST, test_get_available_wifi());
-	EXEC_IF_CMD_EQUALS(STA_CONNECT, test_station_mode_connect());
+	EXEC_IF_CMD_EQUALS(STA_CONNECT, sta_connect_cli(args));
 	EXEC_IF_CMD_EQUALS(GET_STA_CONFIG, test_station_mode_get_info());
 	EXEC_IF_CMD_EQUALS(STA_DISCONNECT, test_station_mode_disconnect());
 	EXEC_IF_CMD_EQUALS(SET_WIFI_MODE, test_set_wifi_mode_station());
@@ -97,9 +95,7 @@ static int parse_cli_cmd(char *in_cmd, char *args[])
 	EXEC_IF_CMD_EQUALS(SET_COUNTRY_CODE, test_set_country_code());
 	EXEC_IF_CMD_EQUALS(SET_COUNTRY_CODE_ENABLED, test_set_country_code_with_ieee80211d_on());
 	EXEC_IF_CMD_EQUALS(GET_COUNTRY_CODE, test_get_country_code());
-	EXEC_IF_CMD_EQUALS(CUSTOM_RPC_DEMO1, demo1_custom_rpc_unserialised_request_only_ack());
-	EXEC_IF_CMD_EQUALS(CUSTOM_RPC_DEMO2, demo2_custom_rpc_unserialised_request_and_slave_echo_back_as_response());
-	EXEC_IF_CMD_EQUALS(CUSTOM_RPC_DEMO3, demo3_custom_rpc_unserialised_request_and_slave_echo_back_as_event());
+	EXEC_IF_CMD_EQUALS(PEER_DATA_EXAMPLE, run_peer_data_example());
 
 	if (cmd_executed)
 		return SUCCESS;
@@ -115,6 +111,8 @@ static int init_app(void)
 		printf("init hosted control lib failed\n");
 		return FAILURE;
 	}
+
+	test_is_network_split_on();
 
 	register_event_callbacks();
 
@@ -145,6 +143,22 @@ static void sig_handler(int signum)
 	cleanup_app();
 }
 
+/* Strip --non-blocking/-nb from argv; returns whether to block on connect.
+ * Default is blocking so we don't exit and leave ethsta0 dangling. */
+static bool parse_blocking_flag(int *argc, char **argv)
+{
+	bool blocking = true;
+	for (int i = 1; i < *argc; i++) {
+		if (!strcasecmp(argv[i], "--non-blocking") || !strcasecmp(argv[i], "-nb")) {
+			blocking = false;
+			for (int j = i; j < *argc - 1; j++)
+				argv[j] = argv[j + 1];
+			(*argc)--; i--;
+		}
+	}
+	return blocking;
+}
+
 int main(int argc, char *argv[])
 {
 	char * cli_cmd = NULL;
@@ -155,6 +169,8 @@ int main(int argc, char *argv[])
 		printf("Please re-run program with superuser access\n");
 		return FAILURE;
 	}
+
+	bool blocking = parse_blocking_flag(&argc, argv);
 
 	if (argc == 1) {
 		usage(argv);
@@ -184,6 +200,19 @@ int main(int argc, char *argv[])
 	cli_cmd = argv[1];
 	if (SUCCESS == parse_cli_cmd(cli_cmd, &argv[2])) {
 
+		/* connect is async; optionally wait for the event (brings ethsta0 up). */
+		if (blocking && !strncasecmp(cli_cmd, STA_CONNECT, sizeof(STA_CONNECT))) {
+			printf("Waiting up to %d s for station connect result...\n", STA_CONNECT_WAIT_SEC);
+			switch (test_wait_sta_connect(STA_CONNECT_WAIT_SEC)) {
+			case STA_CONN_CONNECTED:
+				printf("Station connected; ethsta0 is up.\n"); break;
+			case STA_CONN_DISCONNECTED:
+				printf("Station connect failed/disconnected; ethsta0 is down.\n"); break;
+			default:
+				printf("Timeout: no station connect result in %d s.\n", STA_CONNECT_WAIT_SEC); break;
+			}
+		}
+
 #if ENABLE_HEARTBEAT
 		sleep(2);
 		printf("\n\n\nRequested operation complete\n");
@@ -198,36 +227,7 @@ int main(int argc, char *argv[])
 }
 
 
-/* ------------------- Custom RPC Packed Data DEMO 1 ------------------- */
-/* This demo shows how to send a custom RPC request with packed data
- * and receive an echo back response.
- * The response is not verified in this demo (as it is not expected)
- */
-/* Implementation of demo_custom_rpc_unserialised_request_no_echo_back */
-static int demo1_custom_rpc_unserialised_request_only_ack(void) {
-	/* Call the shared implementation */
-	return custom_rpc_demo1_request_only_ack();
-}
-
-/* ------------------- Custom RPC Packed Data DEMO 2 ------------------- */
-/* This demo shows how to send a custom RPC request with packed data
- * and receive an echo back response.
- * The response is verified in this demo to be the same as the sent data.
- */
-static int demo2_custom_rpc_unserialised_request_and_slave_echo_back_as_response(void) {
-	/* Call the shared implementation */
-	return custom_rpc_demo2_request_echo_back_as_response();
-}
-
-/* ------------------- Custom RPC Packed Data DEMO 3 ------------------- */
-/* This demo shows how to send a custom RPC request with packed data
- * and receive an echo back the sent data as an event.
- * The event is verified in this demo to be the same as the sent data.
- * The response is not verified in this demo (as it is not expected)
- */
-
-/* Implementation of demo_custom_rpc_unserialised_request_and_slave_echo_back_as_event */
-static int demo3_custom_rpc_unserialised_request_and_slave_echo_back_as_event(void) {
-	/* Call the shared implementation */
-	return custom_rpc_demo3_request_echo_back_as_event();
+/* ------------------- Peer Data Transfer Example ------------------- */
+static int run_peer_data_example(void) {
+	return peer_data_example_run();
 }

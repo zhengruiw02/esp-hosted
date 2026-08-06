@@ -8,6 +8,7 @@
 #ifndef _ESP_DECL_H_
 #define _ESP_DECL_H_
 
+#include <linux/wait.h>
 #include "esp.h"
 
 /* Interrupt Status */
@@ -28,7 +29,10 @@
 #define ESP_SLAVE_LEN_MASK             0xFFFFF
 #define ESP_BLOCK_SIZE                 512
 #define ESP_RX_BYTE_MAX                0x100000
-#define ESP_RX_BUFFER_SIZE             2048
+#define ESP_RX_BUFFER_SIZE             15872
+#define ESP_HOST_TX_AGGR_SIZE          ESP_RX_BUFFER_SIZE
+#define ESP_HOST_RX_AGGR_SIZE          15872
+#define ESP_HOST_TX_LATENCY_BYPASS_SIZE 256
 
 #define ESP_TX_BUFFER_MASK             0xFFF
 #define ESP_TX_BUFFER_MAX              0x1000
@@ -70,20 +74,30 @@
 #define ESP_DEVICE_ID_ESP32_2       0x3333
 
 #define ESP_VENDOR_ID_2             0x0092
-#define ESP_DEVICE_ID_ESP32C6_1     0x6666
-#define ESP_DEVICE_ID_ESP32C6_2     0x7777
-
-#define ESP_VENDOR_ID_3             0x0092
-#define ESP_DEVICE_ID_ESP32C5_1     0x6666
-#define ESP_DEVICE_ID_ESP32C5_2     0x7777
+#define ESP_DEVICE_ID_C5_C6_C61_1   0x6666
+#define ESP_DEVICE_ID_C5_C6_C61_2   0x7777
 
 struct esp_sdio_context {
 	struct esp_adapter     *adapter;
 	struct sdio_func       *func;
 	struct sk_buff_head    tx_q[MAX_PRIORITY_QUEUES];
+	struct sk_buff_head    rx_q;
 	u32                    rx_byte_count;
 	u32                    tx_buffer_count;
 	u32			sdio_clk_mhz;
+	/* TX kthread wakeup: enqueuing a skb wakes tx_process instead of
+	 * relying on its 10-20ms usleep poll. Driven by wake_up()/wait_event. */
+	wait_queue_head_t      tx_waitq;
+	/* Combined reg read: the ISR reads INT_ST..PACKET_LEN in one CMD53 and
+	 * stashes the raw length here so the first read_packet skips its own
+	 * PACKET_LEN read. Set in ISR, consumed once in esp_get_len_from_slave. */
+	bool                   prefetch_len_valid;
+	u32                    prefetch_len_raw;
+	/* DMA-safe SDIO reg buffers allocated once at probe (not per IRQ/packet):
+	 * reg_buf = ISR INT_ST..PACKET_LEN read (3 words); rx_len_buf = per-packet
+	 * PACKET_LEN read (1 word). */
+	u32                    *reg_buf;
+	u32                    *rx_len_buf;
 };
 
 #endif

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: 2021-2024 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2021-2026 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -43,10 +43,29 @@
 #include "stats.h"
 #include "esp_fw_version.h"
 #include "esp_hosted_cli.h"
+#ifdef ESP_HOSTED_COPROCESSOR_EXAMPLE_HTTP_CLIENT
+#include "example_http_client.h"
+#endif
+#include "esp_wifi.h"
 
-#include "host_power_save.h"
+#if CONFIG_NETWORK_SPLIT_ENABLED
+	#include "host_power_save.h"
+	#include "esp_hosted_config.pb-c.h"
 
-#include "esp_hosted_custom_rpc.h"
+
+	volatile uint8_t station_got_ip = 0;
+
+	#include "wifi_cmd.h"
+
+	/* Perform DHCP at slave & send IP info at host */
+	#define H_SLAVE_LWIP_DHCP_AT_SLAVE       1
+
+#endif
+#include "nw_split_router.h"
+
+#ifdef CONFIG_ESP_HOSTED_COPROCESSOR_EXAMPLE_PEER_DATA
+#include "peer_data_example.h"
+#endif
 
 static const char TAG[] = "fg_slave";
 
@@ -56,7 +75,8 @@ static const char TAG[] = "fg_slave";
 #define TO_HOST_QUEUE_SIZE               10
 
 #define ETH_DATA_LEN                     1500
-#define MAX_WIFI_STA_TX_RETRY            2
+#define MAX_WIFI_STA_TX_RETRY            8
+#define WIFI_TX_RETRY_DELAY_MS           1
 
 
 
@@ -76,11 +96,15 @@ static struct rx_data {
 	uint8_t valid;
 	uint16_t cur_seq_no;
 	int len;
-	uint8_t data[4096];
+	uint8_t *data;
 } r;
 
-static esp_err_t handle_custom_unserialised_rpc_request(const custom_rpc_unserialised_data_t *req, custom_rpc_unserialised_data_t *resp_out);
-esp_err_t create_and_send_custom_rpc_unserialised_event(uint32_t custom_event_id, const void *data, size_t data_len);
+/* Add at the top with other static variables */
+#if H_HOST_PS_ALLOWED
+#define MAX_DHCP_DNS_RETRIES 10
+static int dhcp_dns_retry_count = 0;
+static TimerHandle_t delayed_dhcp_dns_timer = NULL;
+#endif
 
 static void print_firmware_version()
 {
@@ -178,9 +202,14 @@ DONE:
 	return ESP_OK;
 }
 
+/* This function would check the incoming packet from AP
+ * to send it to local lwip or host lwip depending upon the
+ * destination port used in the packet
+ */
 esp_err_t wlan_sta_rx_callback(void *buffer, uint16_t len, void *eb)
 {
 	interface_buffer_handle_t buf_handle = {0};
+	hosted_l2_bridge bridge_to_use = HOST_LWIP_BRIDGE;
 
 	if (!buffer || !eb) {
 		if (eb) {
@@ -192,14 +221,95 @@ esp_err_t wlan_sta_rx_callback(void *buffer, uint16_t len, void *eb)
 
 	ESP_HEXLOGV("STA_Get", buffer, len, 64);
 
-	populate_wifi_buffer_handle(&buf_handle, ESP_STA_IF, buffer, len);
+#if ESP_PKT_STATS
+	pkt_stats.sta_lwip_in++;
+#endif
 
-	if (unlikely(send_to_host_queue(&buf_handle, PRIO_Q_OTHERS)))
-		goto DONE;
+#ifdef CONFIG_NETWORK_SPLIT_ENABLED
+	/* Filter and route the packet based on destination port */
+	bridge_to_use = filter_and_route_packet(buffer, len);
+#else
+	/* default as co-processor mode */
+	bridge_to_use = HOST_LWIP_BRIDGE;
+#endif
+
+	switch (bridge_to_use) {
+		case HOST_LWIP_BRIDGE:
+			if (!datapath) {
+				ESP_LOGV(TAG, "datapath closed, drop packet");
+				goto DONE;
+			}
+			/* Send to Host */
+			ESP_LOGV(TAG, "host packet");
+			populate_wifi_buffer_handle(&buf_handle, ESP_STA_IF, buffer, len);
+
+			if (unlikely(send_to_host_queue(&buf_handle, PRIO_Q_OTHERS)))
+				goto DONE;
 
 #if ESP_PKT_STATS
-	pkt_stats.sta_sh_in++;
+			pkt_stats.sta_sh_in++;
+			pkt_stats.sta_host_lwip_out++;
 #endif
+			break;
+
+		case SLAVE_LWIP_BRIDGE:
+			/* Send to local LWIP */
+			ESP_LOGV(TAG, "slave packet");
+			if (!slave_sta_netif) {
+				ESP_LOGW(TAG, "slave_sta_netif not init, drop slave packet");
+				goto DONE;
+			}
+			esp_netif_receive(slave_sta_netif, buffer, len, eb);
+#if ESP_PKT_STATS
+			pkt_stats.sta_slave_lwip_out++;
+#endif
+			break;
+
+		case BOTH_LWIP_BRIDGE:
+			ESP_LOGV(TAG, "slave & host packet");
+
+			/* Allocate host copy only when datapath is open. */
+			void *copy_buff = NULL;
+			if (datapath) {
+				copy_buff = malloc(len);
+				if (copy_buff)
+					memcpy(copy_buff, buffer, len);
+				else
+					ESP_LOGW(TAG, "no mem for host copy, slave-only this packet");
+			}
+
+			/* slave netif takes ownership of eb */
+			if (!slave_sta_netif) {
+				ESP_LOGW(TAG, "slave_sta_netif not init, drop slave part");
+				esp_wifi_internal_free_rx_buffer(eb);
+			} else {
+				esp_netif_receive(slave_sta_netif, buffer, len, eb);
+			}
+
+			if (copy_buff) {
+				populate_buff_handle(&buf_handle, ESP_STA_IF, copy_buff, len, free, copy_buff, 0, 0, 0);
+				if (unlikely(send_to_host_queue(&buf_handle, PRIO_Q_OTHERS))) {
+					free(copy_buff);
+					return ESP_OK;
+				}
+
+			#if ESP_PKT_STATS
+				pkt_stats.sta_sh_in++;
+				pkt_stats.sta_both_lwip_out++;
+			#endif
+			} else {
+			#if ESP_PKT_STATS
+				pkt_stats.sta_slave_lwip_out++;
+			#endif
+			}
+
+			break;
+
+		default:
+			ESP_LOGV(TAG, "Packet filtering failed, drop packet");
+			goto DONE;
+	}
+
 	return ESP_OK;
 
 DONE:
@@ -207,43 +317,7 @@ DONE:
 	return ESP_OK;
 }
 
-static void process_tx_pkt(interface_buffer_handle_t *buf_handle)
-{
-	int host_awake = 1;
-
-	/* Check if data path is not yet open */
-	if (!datapath) {
-		/* Post processing */
-		if (buf_handle->free_buf_handle && buf_handle->priv_buffer_handle) {
-			buf_handle->free_buf_handle(buf_handle->priv_buffer_handle);
-			buf_handle->priv_buffer_handle = NULL;
-		}
-		ESP_LOGD(TAG, "Data path stopped");
-		usleep(100*1000);
-		return;
-	}
-	if (if_context && if_context->if_ops && if_context->if_ops->write) {
-
-		if (is_host_power_saving() && is_host_wakeup_needed(buf_handle)) {
-			ESP_LOGI(TAG, "Host sleeping, trigger wake-up");
-			ESP_HEXLOGW("Wakeup_pkt", buf_handle->payload+H_ESP_PAYLOAD_HEADER_OFFSET,
-					buf_handle->payload_len, buf_handle->payload_len);
-			host_awake = wakeup_host(portMAX_DELAY);
-			buf_handle->flag |= FLAG_WAKEUP_PKT;
-		}
-
-		if (host_awake)
-			if_context->if_ops->write(if_handle, buf_handle);
-		else
-			ESP_LOGI(TAG, "Host wakeup failed, drop packet");
-	}
-
-	/* Post processing */
-	if (buf_handle->free_buf_handle && buf_handle->priv_buffer_handle) {
-		buf_handle->free_buf_handle(buf_handle->priv_buffer_handle);
-		buf_handle->priv_buffer_handle = NULL;
-	}
-}
+/* TX ownership now lives in transport write(). */
 
 static void parse_protobuf_req(void)
 {
@@ -266,12 +340,11 @@ static void process_serial_rx_pkt(uint8_t *buf)
 	struct esp_payload_header *header = NULL;
 	uint16_t payload_len = 0;
 	uint8_t *payload = NULL;
-	int rem_buff_size;
+	uint8_t *new_data = NULL;
 
 	header = (struct esp_payload_header *) buf;
 	payload_len = le16toh(header->len);
 	payload = buf + le16toh(header->offset);
-	rem_buff_size = sizeof(r.data) - r.len;
 
 	ESP_HEXLOGV("serial_rx", payload, payload_len, 32);
 
@@ -295,8 +368,19 @@ static void process_serial_rx_pkt(uint8_t *buf)
 		return;
 	}
 
-	memcpy((r.data + r.len), payload, min(payload_len, rem_buff_size));
-	r.len += min(payload_len, rem_buff_size);
+	new_data = realloc(r.data, r.len + payload_len);
+	if (!new_data) {
+		ESP_LOGE(TAG, "serial rx realloc failed (need %d bytes), dropping",
+			r.len + payload_len);
+		free(r.data);
+		r.data = NULL;
+		r.len = 0;
+		r.cur_seq_no = 0;
+		return;
+	}
+	r.data = new_data;
+	memcpy(r.data + r.len, payload, payload_len);
+	r.len += payload_len;
 
 	if (!(header->flags & MORE_FRAGMENT)) {
 		/* Received complete buffer */
@@ -324,6 +408,39 @@ static void process_priv_pkt(uint8_t *payload, uint16_t payload_len)
 	}
 }
 
+/* Host->slave private command. */
+static void process_priv_command(uint8_t *payload, uint16_t payload_len)
+{
+	if (!payload || !payload_len)
+		return;
+
+#if TEST_RAW_TP
+	process_raw_tp_cmd(payload[0]);
+#else
+	ESP_LOGW(TAG, "Priv command %u ignored (raw-tp not built in)", payload[0]);
+#endif
+}
+
+/* Retry transient WiFi TX buffer exhaustion. */
+static int wifi_tx_with_retry(wifi_interface_t wifi_if, uint8_t *payload,
+		uint16_t payload_len)
+{
+	int ret = ESP_OK;
+	int retry = MAX_WIFI_STA_TX_RETRY;
+
+	do {
+		ret = esp_wifi_internal_tx(wifi_if, payload, payload_len);
+		if (ret != ESP_ERR_NO_MEM)
+			break;
+#if ESP_PKT_STATS
+		pkt_stats.wifi_tx_retries++;
+#endif
+		vTaskDelay(pdMS_TO_TICKS(WIFI_TX_RETRY_DELAY_MS));
+	} while (--retry);
+
+	return ret;
+}
+
 static void process_rx_pkt(interface_buffer_handle_t *buf_handle)
 {
 
@@ -331,7 +448,6 @@ static void process_rx_pkt(interface_buffer_handle_t *buf_handle)
 	uint8_t *payload = NULL;
 	uint16_t payload_len = 0;
 	int ret = 0;
-	int retry_wifi_tx = MAX_WIFI_STA_TX_RETRY;
 
 	header = (struct esp_payload_header *) buf_handle->payload;
 	payload = buf_handle->payload + le16toh(header->offset);
@@ -340,16 +456,9 @@ static void process_rx_pkt(interface_buffer_handle_t *buf_handle)
 	ESP_HEXLOGV("bus_RX", payload, payload_len, 16);
 
 
-    if (buf_handle->if_type == ESP_STA_IF && station_connected) {
-        /* Forward data to wlan driver */
-        do {
-            ret = esp_wifi_internal_tx(WIFI_IF_STA, payload, payload_len);
-            if (ret) {
-                vTaskDelay(pdMS_TO_TICKS(1));
-            }
-
-			retry_wifi_tx--;
-		} while (ret && retry_wifi_tx);
+	if (buf_handle->if_type == ESP_STA_IF && station_connected) {
+		/* Forward data to wlan driver */
+		ret = wifi_tx_with_retry(WIFI_IF_STA, payload, payload_len);
 
 #if ESP_PKT_STATS
 		if (ret)
@@ -357,17 +466,26 @@ static void process_rx_pkt(interface_buffer_handle_t *buf_handle)
 		else
 			pkt_stats.hs_bus_sta_out++;
 #endif
-    } else if (buf_handle->if_type == ESP_AP_IF && softap_started) {
-        /* Forward data to wlan driver */
-        esp_wifi_internal_tx(WIFI_IF_AP, payload, payload_len);
-        ESP_HEXLOGV("AP_Put", payload, payload_len, 32);
-    } else if (buf_handle->if_type == ESP_SERIAL_IF) {
+	} else if (buf_handle->if_type == ESP_AP_IF && softap_started) {
+		/* Forward data to wlan driver */
+		ret = wifi_tx_with_retry(WIFI_IF_AP, payload, payload_len);
+#if ESP_PKT_STATS
+		if (ret)
+			pkt_stats.hs_bus_ap_fail++;
+		else
+			pkt_stats.hs_bus_ap_out++;
+#endif
+		ESP_HEXLOGV("AP_Put", payload, payload_len, 32);
+	} else if (buf_handle->if_type == ESP_SERIAL_IF) {
 #if ESP_PKT_STATS
 		pkt_stats.serial_rx++;
 #endif
 		process_serial_rx_pkt(buf_handle->payload);
 	} else if (buf_handle->if_type == ESP_PRIV_IF) {
-		process_priv_pkt(payload, payload_len);
+		if (header->priv_pkt_type == ESP_PACKET_TYPE_COMMAND)
+			process_priv_command(payload, payload_len);
+		else
+			process_priv_pkt(payload, payload_len);
 	}
 #if defined(CONFIG_BT_ENABLED) && BLUETOOTH_HCI
 	else if (buf_handle->if_type == ESP_HCI_IF) {
@@ -419,6 +537,8 @@ static ssize_t serial_read_data(uint8_t *data, ssize_t len)
 	len = min(len, r.len);
 	if (r.valid) {
 		memcpy(data, r.data, len);
+		free(r.data);
+		r.data = NULL;
 		r.valid = 0;
 		r.len = 0;
 		r.cur_seq_no = 0;
@@ -430,7 +550,12 @@ static ssize_t serial_read_data(uint8_t *data, ssize_t len)
 
 int send_to_host_queue(interface_buffer_handle_t *buf_handle, uint8_t queue_type)
 {
-	process_tx_pkt(buf_handle);
+	/* write() takes ownership of buf_handle and frees it, so return OK once it
+	 * is reached (caller must not double-free); FAIL only when no transport.
+	 * queue_type is unused - the driver derives the lane from if_type. */
+	if (!if_context || !if_context->if_ops || !if_context->if_ops->write)
+		return ESP_FAIL;
+	if_context->if_ops->write(if_handle, buf_handle);
 	return ESP_OK;
 }
 
@@ -569,8 +694,40 @@ static void register_reset_pin(uint32_t gpio_num)
 	}
 }
 #endif
+#ifdef CONFIG_NETWORK_SPLIT_ENABLED
+void create_slave_sta_netif(uint8_t dhcp_at_slave)
+{
+	/* Create "almost" default station, but with un-flagged DHCP client */
+	esp_netif_inherent_config_t netif_cfg;
+	memcpy(&netif_cfg, ESP_NETIF_BASE_DEFAULT_WIFI_STA, sizeof(netif_cfg));
 
-#if 1
+	if (!dhcp_at_slave)
+		netif_cfg.flags &= ~ESP_NETIF_DHCP_CLIENT;
+
+	esp_netif_config_t cfg_sta = {
+		.base = &netif_cfg,
+		.stack = ESP_NETIF_NETSTACK_DEFAULT_WIFI_STA,
+	};
+	esp_netif_t *netif_sta = esp_netif_new(&cfg_sta);
+	assert(netif_sta);
+
+	ESP_ERROR_CHECK(esp_netif_attach_wifi_station(netif_sta));
+	ESP_ERROR_CHECK(esp_wifi_set_default_wifi_sta_handlers());
+
+	if (!dhcp_at_slave) {
+		ESP_ERROR_CHECK(esp_netif_dhcpc_stop(netif_sta));
+		ESP_LOGI(TAG, "No DHCP at slave");
+	} else {
+		ESP_LOGI(TAG, "DHCP at slave");
+		ESP_ERROR_CHECK(esp_netif_dhcpc_start(netif_sta));
+	}
+
+	slave_sta_netif = netif_sta;
+}
+#endif
+
+/* Inits WiFi + STA mode + start at boot in all modes (so host RPCs don't hit
+ * WIFI_NOT_INIT); the fallback auto-connect inside is gated to network-split. */
 
 #define EXAMPLE_ESP_WIFI_SSID      CONFIG_ESP_WIFI_SSID
 #define EXAMPLE_ESP_WIFI_PASS      CONFIG_ESP_WIFI_PASSWORD
@@ -605,7 +762,7 @@ static void register_reset_pin(uint32_t gpio_num)
   #define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WAPI_PSK
 #endif
 
-static int fallback_to_sdkconfig_wifi_config(void)
+static int __attribute__((unused)) fallback_to_sdkconfig_wifi_config(void)
 {
 	wifi_config_t wifi_config = {
 		.sta = {
@@ -630,7 +787,7 @@ static int fallback_to_sdkconfig_wifi_config(void)
 	return ESP_OK;
 }
 
-static bool wifi_is_provisioned(void)
+static bool __attribute__((unused)) wifi_is_provisioned(void)
 {
 	wifi_config_t wifi_cfg = {0};
 
@@ -673,9 +830,11 @@ static int connect_sta(void)
 	}
 #endif
 
+#ifdef CONFIG_NETWORK_SPLIT_ENABLED
 	if (! wifi_is_provisioned()) {
 		fallback_to_sdkconfig_wifi_config();
 	}
+#endif
 
 	ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
@@ -695,14 +854,69 @@ static int connect_sta(void)
 
 	return ESP_OK;
 }
-#endif
 
+#if H_HOST_PS_ALLOWED
+
+/* Update timer callback function */
+static void delayed_dhcp_dns_timer_cb(TimerHandle_t xTimer)
+{
+	/* Check if host has fetched IP or max retries reached */
+	if (has_host_fetched_auto_ip() || dhcp_dns_retry_count >= MAX_DHCP_DNS_RETRIES) {
+		/* Stop retrying */
+		if (delayed_dhcp_dns_timer) {
+			xTimerDelete(delayed_dhcp_dns_timer, 0);
+			delayed_dhcp_dns_timer = NULL;
+		}
+		dhcp_dns_retry_count = 0;
+		return;
+	}
+
+	send_dhcp_dns_info_to_host(0, 0);
+	dhcp_dns_retry_count++;
+
+}
+
+/* Function to schedule delayed DHCP/DNS info send */
+static void schedule_delayed_dhcp_dns_info(void)
+{
+	const TickType_t delay_ticks = pdMS_TO_TICKS(500); /* 500ms delay */
+
+	/* Delete existing timer if any */
+	if (delayed_dhcp_dns_timer) {
+		xTimerDelete(delayed_dhcp_dns_timer, 0);
+		delayed_dhcp_dns_timer = NULL;
+	}
+
+	/* Create and start one-shot timer */
+	delayed_dhcp_dns_timer = xTimerCreate("DhcpDns",
+			delay_ticks,
+			pdFALSE,  /* One-shot timer */
+			0,
+			delayed_dhcp_dns_timer_cb);
+
+	if (delayed_dhcp_dns_timer) {
+		if (xTimerStart(delayed_dhcp_dns_timer, 0) != pdPASS) {
+			ESP_LOGE(TAG, "Failed to start delayed DHCP/DNS timer");
+			xTimerDelete(delayed_dhcp_dns_timer, 0);
+			delayed_dhcp_dns_timer = NULL;
+		}
+	} else {
+		ESP_LOGE(TAG, "Failed to create delayed DHCP/DNS timer");
+	}
+}
+#endif
 /* Update host wakeup callback */
 void host_wakeup_callback(void)
 {
 	/* Handle immediate wakeup tasks */
 #if H_HOST_PS_ALLOWED
-	// user can hook their own non blocking operation
+	/* Reset retry count on new wakeup */
+	dhcp_dns_retry_count = 0;
+
+	/* Schedule delayed DHCP/DNS info send */
+	if (station_connected) {
+		schedule_delayed_dhcp_dns_info();
+	}
 #endif
 }
 
@@ -726,8 +940,17 @@ static void host_reset_task(void* pvParameters)
 		ESP_LOGI(TAG,"Send slave up event");
 		generate_startup_event(capa);
 		send_event_to_host(CTRL_MSG_ID__Event_ESPInit);
+
+#ifdef CONFIG_NETWORK_SPLIT_ENABLED
+		ESP_LOGI(TAG,"--- Wait for IP ---");
+		while (!station_got_ip) {
+			vTaskDelay(pdMS_TO_TICKS(50));
+		}
+		send_dhcp_dns_info_to_host(1, 1);
+#endif
 	}
 }
+
 
 esp_err_t esp_hosted_coprocessor_init(void)
 {
@@ -735,11 +958,24 @@ esp_err_t esp_hosted_coprocessor_init(void)
 
 	print_firmware_version();
 
+#if CONFIG_NETWORK_SPLIT_ENABLED
+	ESP_ERROR_CHECK(esp_netif_init());
+#endif
 	ESP_ERROR_CHECK(esp_event_loop_create_default());
 
 #if defined(CONFIG_ESP_GPIO_SLAVE_RESET) && (CONFIG_ESP_GPIO_SLAVE_RESET != -1)
 	register_reset_pin(CONFIG_ESP_GPIO_SLAVE_RESET);
 #endif
+
+
+#ifdef CONFIG_ESP_HOSTED_HOST_RESERVED_PORTS_CONFIGURED
+	ESP_LOGI(TAG, "Configuring host static port forwarding rules from slave kconfig");
+	configure_host_static_port_forwarding_rules(CONFIG_ESP_HOSTED_HOST_RESERVED_TCP_SRC_PORTS,
+												CONFIG_ESP_HOSTED_HOST_RESERVED_TCP_DEST_PORTS,
+												CONFIG_ESP_HOSTED_HOST_RESERVED_UDP_SRC_PORTS,
+												CONFIG_ESP_HOSTED_HOST_RESERVED_UDP_DEST_PORTS);
+#endif
+
 
 	host_power_save_init(host_wakeup_callback);
 
@@ -756,14 +992,14 @@ esp_err_t esp_hosted_coprocessor_init(void)
 	/* Endpoint for control command responses */
 	if (protocomm_add_endpoint(pc_pserial, CTRL_EP_NAME_RESP,
 				data_transfer_handler, NULL) != ESP_OK) {
-		ESP_LOGE(TAG, "Failed to add enpoint");
+		ESP_LOGE(TAG, "Failed to add endpoint");
 		return ESP_FAIL;
 	}
 
 	/* Endpoint for control notifications for events subscribed by user */
 	if (protocomm_add_endpoint(pc_pserial, CTRL_EP_NAME_EVENT,
 				ctrl_notify_handler, NULL) != ESP_OK) {
-		ESP_LOGE(TAG, "Failed to add enpoint");
+		ESP_LOGE(TAG, "Failed to add endpoint");
 		return ESP_FAIL;
 	}
 
@@ -799,11 +1035,24 @@ esp_err_t esp_hosted_coprocessor_init(void)
 	esp_hosted_cli_start();
 #endif
 
-#if 1
-	connect_sta();
+#ifdef CONFIG_NETWORK_SPLIT_ENABLED
+
+	create_slave_sta_netif(H_SLAVE_LWIP_DHCP_AT_SLAVE);
+
+	ESP_LOGI(TAG, "Default LWIP post filtering packets to send: %s",
+#if defined(CONFIG_ESP_DEFAULT_LWIP_SLAVE)
+			"slave. Host need to use **static netif** only"
+#elif defined(CONFIG_ESP_DEFAULT_LWIP_HOST)
+			"host"
+#elif defined(CONFIG_ESP_DEFAULT_LWIP_BOTH)
+			"host+slave"
+#endif
+			);
 #endif
 
-	ESP_LOGI(TAG, "bus tx locked on slave bootup");
+	connect_sta();
+
+	ESP_LOGI(TAG, "bus tx locked on slave boot-up");
 
 	while(!datapath) {
 		vTaskDelay(10);
@@ -815,11 +1064,15 @@ esp_err_t esp_hosted_coprocessor_init(void)
 			CONFIG_ESP_HOSTED_TASK_PRIORITY_DEFAULT, NULL) == pdTRUE);
 
 
-	host_power_save_init(host_wakeup_callback);
+  #ifdef CONFIG_NETWORK_SPLIT_ENABLED
+	while (!station_got_ip)
+		sleep(1);
+  #endif
 
 	/* Register how you are going to handle the user defined RPC requests */
-
-	register_custom_rpc_unserialised_req_handler(handle_custom_unserialised_rpc_request);
+#ifdef CONFIG_ESP_HOSTED_COPROCESSOR_EXAMPLE_PEER_DATA
+	peer_data_example_register();
+#endif
 
 	return ESP_OK;
 }
@@ -837,108 +1090,12 @@ void app_main(void)
 	ESP_ERROR_CHECK( ret );
 
 	esp_hosted_coprocessor_init();
-}
+#ifdef CONFIG_NETWORK_SPLIT_ENABLED
 
-/* Example callback functions */
-static esp_err_t handle_custom_unserialised_rpc_request(const custom_rpc_unserialised_data_t *req, custom_rpc_unserialised_data_t *resp_out) {
-	/* --------- Caution ----------
-	 *  Keep this function as simple, small and fast as possible
-	 *  This function is as callback in the Rx thread.
-	 *  Do not use any blocking calls here
-	 * ----------------------------
-	 */
-	esp_err_t ret = ESP_FAIL;
+#ifdef ESP_HOSTED_COPROCESSOR_EXAMPLE_HTTP_CLIENT
+	example_http_client_start();
+#endif
 
-	/* Process custom data from req */
-	ESP_LOGI(TAG, "Received custom RPC request [%" PRIu32 "] with len: %u", req->custom_msg_id, req->data_len);
-	ESP_HEXLOGD("RPC_DATA_IN", req->data, req->data_len, 32);
+#endif
 
-	/* Clear response data structure before use */
-	memset(resp_out, 0, sizeof(custom_rpc_unserialised_data_t));
-
-	resp_out->custom_msg_id = req->custom_msg_id; /* Right now Response ID is same as Request ID, you can customise it as needed */
-
-	switch (req->custom_msg_id) {
-
-		case CUSTOM_RPC_REQ_ID__ECHO_BACK_RESPONSE:
-			/* Example: Echo back the data */
-			if (req->data_len > 0) {
-				resp_out->data = malloc(req->data_len);
-				if (resp_out->data) {
-					memcpy(resp_out->data, req->data, req->data_len);
-					resp_out->data_len = req->data_len;
-					resp_out->free_func = free; /* Always set free function when allocating memory */
-					ESP_LOGI(TAG, "Echoing back %u bytes of data", req->data_len);
-					ret = ESP_OK;
-				} else {
-					ESP_LOGE(TAG, "Failed to allocate memory for response data");
-					ret = ESP_FAIL;
-				}
-			} else {
-				/* No data to echo back, still consider it a success */
-				ESP_LOGI(TAG, "No data to echo back");
-				ret = ESP_OK;
-			}
-			break;
-
-		case CUSTOM_RPC_REQ_ID__ECHO_BACK_AS_EVENT:
-			/* Process the request and trigger an event */
-			if (req->data_len > 0 && req->data) {
-				/* Map the request 'CUSTOM_RPC_REQ_ID__ECHO_BACK_AS_EVENT' to event 'CUSTOM_RPC_EVENT_ID__DEMO_ECHO_BACK_REQUEST' */
-				ret = create_and_send_custom_rpc_unserialised_event(CUSTOM_RPC_EVENT_ID__DEMO_ECHO_BACK_REQUEST, req->data, req->data_len);
-			} else {
-				ESP_LOGI(TAG, "No data to echo back as event");
-				ret = ESP_OK;
-			}
-			break;
-
-		case CUSTOM_RPC_REQ_ID__ONLY_ACK:
-			/* Just process the request, don't return any data */
-			ESP_LOGI(TAG, "Processing request with ID [%" PRIu32 "] - acknowledgement only", req->custom_msg_id);
-			ret = ESP_OK;
-			break;
-
-		default:
-			/* Handle unknown message IDs */
-			ESP_LOGW(TAG, "Unhandled custom RPC request ID [%" PRIu32 "], just acknowledging receipt", req->custom_msg_id);
-			ret = ESP_OK; /* Still return OK to acknowledge receipt */
-			break;
-	}
-
-	/* Debug output for response */
-	if (resp_out->data && resp_out->data_len > 0) {
-		ESP_HEXLOGD("RPC_DATA_OUT", resp_out->data, resp_out->data_len, 32);
-	}
-
-	return ret;
-}
-
-/* Create a helper function to allocate and fill event data structure */
-esp_err_t create_and_send_custom_rpc_unserialised_event(uint32_t custom_event_id, const void *data, size_t data_len) {
-	/* Calculate total size needed for the structure plus data */
-
-	custom_rpc_unserialised_data_t event_data = {0};
-	event_data.data_len = data && data_len > 0 ? data_len : 0;
-
-	ESP_LOGI(TAG, "Creating custom RPC event with ID [%" PRIu32 "], data: %p, data length: %u", custom_event_id, data, event_data.data_len);
-
-	if (event_data.data_len) {
-		/* Allocate memory for the entire structure */
-		event_data.data = (uint8_t *)malloc(event_data.data_len);
-		if (!event_data.data) {
-			ESP_LOGE(TAG, "Failed to allocate memory for custom RPC event");
-			return ESP_FAIL;
-		}
-		memcpy(event_data.data, data, event_data.data_len);
-	}
-
-	/* Fill in the data */
-	event_data.custom_msg_id = custom_event_id;
-	event_data.free_func = (event_data.data_len) ? free : NULL;
-
-
-	/* Send the event */
-	esp_err_t ret = send_custom_rpc_unserialised_event(&event_data);
-
-	return ret;
 }

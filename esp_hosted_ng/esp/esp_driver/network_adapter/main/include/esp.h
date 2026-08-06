@@ -28,8 +28,12 @@
 
 #if defined CONFIG_ESP_SDIO_HOST_INTERFACE
 #define SDIO_SLAVE_QUEUE_SIZE    20
-#define RX_BUF_SIZE              2048
-#define RX_BUF_NUM               20
+extern uint32_t rx_buf_size;
+#define RX_BUF_SIZE              rx_buf_size
+#define RX_BUF_NUM               4
+extern uint32_t sdio_tx_aggr_size;
+#define SDIO_TX_AGGR_SIZE        sdio_tx_aggr_size
+#define SDIO_TX_LATENCY_BYPASS_SIZE 256
 
 #elif defined CONFIG_ESP_SPI_HOST_INTERFACE
 #define RX_BUF_SIZE              1600

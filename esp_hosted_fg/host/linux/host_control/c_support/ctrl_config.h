@@ -55,6 +55,7 @@
 #define DISABLE_BT                         "disable_bt"
 
 #define GET_FW_VERSION                     "get_fw_version"
+#define GET_DHCP_DNS_STATUS                "get_dhcp_dns_status"
 
 #define SET_COUNTRY_CODE                   "set_country_code"
 /* ENABLED means ieee80211d ("additional regulatory domains") enabled */
@@ -62,9 +63,7 @@
 
 #define GET_COUNTRY_CODE                   "get_country_code"
 
-#define CUSTOM_RPC_DEMO1                   "send_packed_data__only_ack"
-#define CUSTOM_RPC_DEMO2                   "send_packed_data__echo_back_as_response"
-#define CUSTOM_RPC_DEMO3                   "send_packed_data__echo_back_as_event"
+#define PEER_DATA_EXAMPLE                  "peer_data_example"
 
 #ifndef SSID_LENGTH
 #define SSID_LENGTH                         33
@@ -91,6 +90,11 @@
 #define STATION_BAND_MODE                   BAND_MODE_AUTO
 #define STATION_MODE_IS_WPA3_SUPPORTED      false
 #define STATION_MODE_LISTEN_INTERVAL        3
+/* PHY bandwidth: 0 = unset (let firmware negotiate default), 1 = HT20, 2 = HT40 */
+#define STATION_MODE_BANDWIDTH              0
+/* PHY protocol bitmap (WIFI_PROTOCOL_*): 0 = unset (firmware default for band).
+ * e.g. 0x07 = 11bgn (2.4G HT40), 0x14 = 11an (5G HT40) */
+#define STATION_MODE_PROTOCOL               0
 
 /* softap mode */
 #define SOFTAP_MODE_MAC_ADDRESS             "cc:bb:aa:ee:ff:dd"
@@ -102,6 +106,9 @@
 #define SOFTAP_MODE_SSID_HIDDEN             false
 #define SOFTAP_MODE_BANDWIDTH               2
 #define SOFTAP_BAND_MODE                    BAND_MODE_AUTO
+/* PHY protocol bitmap (WIFI_PROTOCOL_*): 0 = firmware default. 40MHz needs 11n
+ * (0x07 = 11bgn on 2.4G, 0x14 = 11an on 5G) */
+#define SOFTAP_MODE_PROTOCOL                0
 
 /* COUNTRY_CODE is expected to be three octets. */
 /* From documentation for esp_wifi_set_country_code():

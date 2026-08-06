@@ -1,12 +1,9 @@
-/* SPDX-License-Identifier: GPL-2.0-only */
-/*
- * Espressif Systems Wireless LAN device driver
- *
- * Copyright (C) 2015-2021 Espressif Systems (Shanghai) PTE LTD
- */
+// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: 2015-2026 Espressif Systems (Shanghai) CO LTD
 
 #include "hosted_shell.h"
 #include "test.h"
+#include "esp_hosted_wifi_phy.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,14 +17,15 @@
 #include <replxx.h>
 #include <stdbool.h>
 #include "nw_helper_func.h"
-#include "esp_hosted_custom_rpc.h"
-#include "app_custom_rpc.h"
+#include "app_peer_data_transfer.h"
 #include <stdint.h>
 
 
 #define MAC_ADDR_LENGTH 18
 #define NETWORK_CHECK_INTERVAL_MS 100
 #define RPC_RETRY_INTERVAL_MS     1000
+
+#define POLL_FOR_IP_RESTORE  (0)
 
 /* Define WiFi band mode constants */
 #define WIFI_BAND_MODE_AUTO 3
@@ -248,6 +246,7 @@ static const char *wifi_mode_choices[] = {"station", "softap", "station+softap",
 static const char *wifi_powersave_choices[] = {"none", "min", "max", NULL};
 static const char *wifi_interface_choices[] = {"station", "softap", NULL};
 static const char *wifi_band_mode_choices[] = {"2.4G", "5G", "auto", NULL};
+static const char *wifi_protocol_choices[] = {"auto", "legacy", "11n", "11ac", "11ax", "lr", NULL};
 static const char *wifi_sec_prot_choices[] = {"open", "wpa_psk", "wpa2_psk", "wpa_wpa2_psk", NULL};
 
 /* Define command arguments */
@@ -267,7 +266,9 @@ static const cmd_arg_t connect_ap_args[] = {
 	{"--use_wpa3", "Use WPA3 security protocol", ARG_TYPE_BOOL, false, NULL},
 	{"--listen_interval", "Number of AP beacons station will sleep", ARG_TYPE_INT, false, NULL},
 	{"--run_dhcp_client", "Request DHCP", ARG_TYPE_BOOL, false, NULL},
-	{"--band_mode", "Connect on 2.4G or 5G band", ARG_TYPE_CHOICE, false, wifi_band_mode_choices}
+	{"--band_mode", "Connect on 2.4G or 5G band", ARG_TYPE_CHOICE, false, wifi_band_mode_choices},
+	{"--bw", "PHY bandwidth in MHz [20|40] (omit = firmware default)", ARG_TYPE_INT, false, NULL},
+	{"--protocol", "PHY protocol; 40MHz needs 11n (11bgn@2.4G, 11an@5G)", ARG_TYPE_CHOICE, false, wifi_protocol_choices}
 };
 
 static const cmd_arg_t disconnect_ap_args[] = {
@@ -288,7 +289,8 @@ static const cmd_arg_t start_softap_args[] = {
 	{"--hide_ssid", "Hide SSID broadcasting", ARG_TYPE_BOOL, false, NULL},
 	{"--bw", "Wi-Fi Bandwidth [20|40]", ARG_TYPE_INT, false, NULL},
 	{"--start_dhcp_server", "Start DHCP server", ARG_TYPE_BOOL, false, NULL},
-	{"--band_mode", "Band mode [2.4G, 5G, auto]", ARG_TYPE_CHOICE, false, wifi_band_mode_choices}
+	{"--band_mode", "Band mode [2.4G, 5G, auto]", ARG_TYPE_CHOICE, false, wifi_band_mode_choices},
+	{"--protocol", "PHY protocol; 40MHz needs 11n (11n@2.4G or 5G)", ARG_TYPE_CHOICE, false, wifi_protocol_choices}
 };
 
 static const cmd_arg_t set_wifi_power_save_args[] = {
@@ -310,14 +312,16 @@ static const cmd_arg_t heartbeat_args[] = {
 
 
 static const char *event_choices[] = {
-    "esp_init",
-    "heartbeat",
-    "sta_connected",
-    "sta_disconnected",
-    "softap_sta_connected",
-    "softap_sta_disconnected",
+	"esp_init",
+	"heartbeat",
+	"sta_connected",
+	"sta_disconnected",
+	"softap_sta_connected",
+	"softap_sta_disconnected",
+	"dhcp_dns_status",
 	"custom_packed_event",
-    NULL
+	"all",
+	NULL
 };
 
 static const cmd_arg_t subscribe_event_args[] = {
@@ -326,10 +330,6 @@ static const cmd_arg_t subscribe_event_args[] = {
 
 static const cmd_arg_t unsubscribe_event_args[] = {
 	{"--event", "Event to unsubscribe from", ARG_TYPE_CHOICE, true, event_choices}
-};
-
-static const cmd_arg_t custom_rpc_request_args[] = {
-	{"--demo", "Demo number (1, 2, or 3)", ARG_TYPE_INT, true, NULL}
 };
 
 static const cmd_arg_t set_country_code_args[] = {
@@ -365,7 +365,8 @@ static int handle_ota_update(int argc, char **argv);
 static int handle_heartbeat(int argc, char **argv);
 static int handle_subscribe_event(int argc, char **argv);
 static int handle_unsubscribe_event(int argc, char **argv);
-static int handle_custom_demo_rpc_request(int argc, char **argv);
+static int handle_set_host_port_range(int argc, char **argv);
+static int handle_peer_data_example(int argc, char **argv);
 static int handle_set_country_code(int argc, char **argv);
 static int handle_set_country_code_with_ieee80211d_on(int argc, char **argv);
 static int handle_get_country_code(int argc, char **argv);
@@ -401,7 +402,8 @@ static const shell_command_t commands[] = {
 	{"heartbeat", "Configure heartbeat", handle_heartbeat, heartbeat_args, sizeof(heartbeat_args)/sizeof(cmd_arg_t)},
 	{"subscribe_event", "Subscribe to events", handle_subscribe_event, subscribe_event_args, sizeof(subscribe_event_args)/sizeof(cmd_arg_t)},
 	{"unsubscribe_event", "Unsubscribe from events", handle_unsubscribe_event, unsubscribe_event_args, sizeof(unsubscribe_event_args)/sizeof(cmd_arg_t)},
-	{"custom_demo_rpc_request", "Send custom RPC demo request and wait for response", handle_custom_demo_rpc_request, custom_rpc_request_args, sizeof(custom_rpc_request_args)/sizeof(cmd_arg_t)},
+	{"peer_data_example", "Run peer data transfer example", handle_peer_data_example, NULL, 0},
+	{"cli_set_host_port_range", "Set host port range", handle_set_host_port_range, NULL, 0},
 	{"exit", "Exit the shell", handle_exit, NULL, 0},
 	{"quit", "Exit the shell", handle_exit, NULL, 0},
 	{"q", "Exit the shell", handle_exit, NULL, 0},
@@ -636,6 +638,15 @@ static int handle_connect(int argc, char **argv) {
 	const char *band_mode = get_arg_value(argc, argv, connect_ap_args,
 			sizeof(connect_ap_args)/sizeof(cmd_arg_t),
 			"--band_mode");
+	const char *bw = get_arg_value(argc, argv, connect_ap_args,
+			sizeof(connect_ap_args)/sizeof(cmd_arg_t),
+			"--bw");
+	const char *protocol = get_arg_value(argc, argv, connect_ap_args,
+			sizeof(connect_ap_args)/sizeof(cmd_arg_t),
+			"--protocol");
+	const char *run_dhcp_client = get_arg_value(argc, argv, connect_ap_args,
+			sizeof(connect_ap_args)/sizeof(cmd_arg_t),
+			"--run_dhcp_client");
 
 	/* Use default values from ctrl_config.h if arguments are not provided */
 	if (!ssid || strlen(ssid)==0) {
@@ -666,8 +677,57 @@ static int handle_connect(int argc, char **argv) {
 		}
 	}
 
+	/* PHY bandwidth in MHz (20/40); also accept raw enum 1/2. 0/omit = auto. */
+	int bandwidth_value = STATION_MODE_BANDWIDTH;
+	if (bw) {
+		int m = atoi(bw);
+		bandwidth_value = (m == 40) ? H_WIFI_BW_HT40 : (m == 20) ? H_WIFI_BW_HT20 : m;
+	}
+
+	/* PHY protocol: band-agnostic token -> H_WIFI_PROTOCOL_* bitmap, resolved using
+	 * the chosen band (0 = unset/firmware default). Mirrors the Python control app
+	 * (py_parse/process.py). 11ac is 5G-only, lr is 2.4G-only. */
+	int is_5g = (band_mode_value == WIFI_BAND_MODE_5G);
+	int band_specific = (band_mode_value == WIFI_BAND_MODE_24G ||
+			band_mode_value == WIFI_BAND_MODE_5G);
+	int protocol_value = STATION_MODE_PROTOCOL;
+	if (protocol && strcmp(protocol, "auto") != 0) {
+		if (!band_specific) {
+			printf("protocol needs a specific band_mode (2.4G or 5G), not auto\n");
+			return FAILURE;
+		}
+		if (strcmp(protocol, "legacy") == 0)     protocol_value = is_5g ? H_PHY_5G_LEGACY : H_PHY_2G_LEGACY;
+		else if (strcmp(protocol, "11n") == 0)   protocol_value = is_5g ? H_PHY_5G_11N : H_PHY_2G_11N;
+		else if (strcmp(protocol, "11ac") == 0)  protocol_value = is_5g ? H_PHY_5G_11AC : -1; /* 5G only */
+		else if (strcmp(protocol, "11ax") == 0)  protocol_value = is_5g ? H_PHY_5G_11AX : H_PHY_2G_11AX;
+		else if (strcmp(protocol, "lr") == 0)    protocol_value = is_5g ? -1 : H_PHY_2G_LR; /* 2.4G only */
+		if (protocol_value < 0) {
+			printf("protocol '%s' is not valid on this band\n", protocol);
+			return FAILURE;
+		}
+	}
+
+	/* HT40 exists only in 11n: bw=40 with no protocol auto-selects band 11n; an
+	 * explicit 11ax/ac alongside bw=40 is a real contradiction -> reject early. */
+	if (bandwidth_value == H_WIFI_BW_HT40) {
+		if (!band_specific) {
+			printf("bw=40 (HT40) needs a specific band_mode (2.4G or 5G)\n");
+			return FAILURE;
+		}
+		if (protocol_value == 0) {
+			protocol_value = is_5g ? H_PHY_5G_11N : H_PHY_2G_11N;
+		} else if ((protocol_value & (H_WIFI_PROTOCOL_11AX | H_WIFI_PROTOCOL_11AC)) ||
+				!(protocol_value & H_WIFI_PROTOCOL_11N)) {
+			printf("bw=40 (HT40) needs 11n; protocol '%s' enables 11ax/ac. "
+					"Use --protocol 11n or omit it (auto-selects 11n)\n", protocol);
+			return FAILURE;
+		}
+	}
+
 	/*printf("ssid: %s pwd: %s bssid: %s use_wpa3: %s listen_interval: %s band_mode: %s\n",
 	  ssid, pwd, bssid, use_wpa3, listen_interval, band_mode);*/
+
+	test_set_run_dhcp_client(run_dhcp_client ? is_arg_true(run_dhcp_client) : false);
 
 	return test_station_mode_connect_with_params(
 			ssid,
@@ -675,7 +735,9 @@ static int handle_connect(int argc, char **argv) {
 			bssid,
 			use_wpa3_value,
 			listen_interval_value,
-			band_mode_value
+			band_mode_value,
+			bandwidth_value,
+			protocol_value
 			);
 }
 
@@ -746,6 +808,9 @@ static int handle_start_softap(int argc, char **argv) {
 	const char *band_mode = get_arg_value(argc, argv, start_softap_args,
 			sizeof(start_softap_args)/sizeof(cmd_arg_t),
 			"--band_mode");
+	const char *protocol = get_arg_value(argc, argv, start_softap_args,
+			sizeof(start_softap_args)/sizeof(cmd_arg_t),
+			"--protocol");
 
 	/* Use default values from ctrl_config.h if arguments are not provided */
 	if (!ssid) {
@@ -762,7 +827,12 @@ static int handle_start_softap(int argc, char **argv) {
 	const char *encryption_mode = sec_prot ? sec_prot : "wpa2_psk"; // Default to WPA2
 	int max_conn_value = max_conn ? atoi(max_conn) : SOFTAP_MODE_MAX_ALLOWED_CLIENTS;
 	bool hide_ssid_value = hide_ssid ? is_arg_true(hide_ssid) : SOFTAP_MODE_SSID_HIDDEN;
-	int bw_value = bw ? atoi(bw) : SOFTAP_MODE_BANDWIDTH;
+	/* Accept MHz (20/40) like the station path; also accept raw enum 1/2. */
+	int bw_value = SOFTAP_MODE_BANDWIDTH;
+	if (bw) {
+		int m = atoi(bw);
+		bw_value = (m == 40) ? H_WIFI_BW_HT40 : (m == 20) ? H_WIFI_BW_HT20 : m;
+	}
 
 	int band_mode_value = SOFTAP_BAND_MODE;
 	if (band_mode) {
@@ -775,6 +845,27 @@ static int handle_start_softap(int argc, char **argv) {
 		}
 	}
 
+	/* PHY protocol: band-agnostic token -> bitmap (mirrors station + Python).
+	 * 11ac is 5G-only, lr is 2.4G-only. */
+	int sap_is_5g = (band_mode_value == WIFI_BAND_MODE_5G);
+	int protocol_value = SOFTAP_MODE_PROTOCOL;
+	if (protocol && strcmp(protocol, "auto") != 0) {
+		if (strcmp(protocol, "legacy") == 0)     protocol_value = sap_is_5g ? H_PHY_5G_LEGACY : H_PHY_2G_LEGACY;
+		else if (strcmp(protocol, "11n") == 0)   protocol_value = sap_is_5g ? H_PHY_5G_11N : H_PHY_2G_11N;
+		else if (strcmp(protocol, "11ac") == 0)  protocol_value = sap_is_5g ? H_PHY_5G_11AC : -1;
+		else if (strcmp(protocol, "11ax") == 0)  protocol_value = sap_is_5g ? H_PHY_5G_11AX : H_PHY_2G_11AX;
+		else if (strcmp(protocol, "lr") == 0)    protocol_value = sap_is_5g ? -1 : H_PHY_2G_LR;
+		if (protocol_value < 0) {
+			printf("protocol '%s' is not valid on this band\n", protocol);
+			return FAILURE;
+		}
+	}
+	/* HT40 (bw=2) exists only in 11n: auto-select band 11n when protocol unset;
+	 * an explicit 11ax/ac is left to the slave to reject. */
+	if (bw_value == H_WIFI_BW_HT40 && protocol_value == 0) {
+		protocol_value = sap_is_5g ? H_PHY_5G_11N : H_PHY_2G_11N;
+	}
+
 	return test_softap_mode_start_with_params(
 			ssid,
 			password,
@@ -783,7 +874,8 @@ static int handle_start_softap(int argc, char **argv) {
 			max_conn_value,
 			hide_ssid_value,
 			bw_value,
-			band_mode_value
+			band_mode_value,
+			protocol_value
 			);
 }
 
@@ -957,6 +1049,29 @@ static int handle_unsubscribe_event(int argc, char **argv) {
 	return test_unsubscribe_event(event);
 }
 
+static int handle_set_host_port_range(int argc, char **argv) {
+	if (argc != 3) {
+		printf("Usage: cli_set_host_port_range <start_port> <end_port>\n");
+		return -1;
+	}
+
+	int start_port = atoi(argv[1]);
+	int end_port = atoi(argv[2]);
+
+	if (start_port < 0 || start_port > 65535 || end_port < 0 || end_port > 65535) {
+		printf("Ports must be between 0 and 65535\n");
+		return -1;
+	}
+
+	if (start_port >= end_port) {
+		printf("Start port must be less than end port\n");
+		return -1;
+	}
+
+	return update_host_network_port_range(start_port, end_port);
+}
+
+
 /* Shell initialization */
 static int shell_init(shell_context_t *ctx) {
 	if (!ctx) {
@@ -1000,9 +1115,8 @@ static void shell_cleanup(shell_context_t *ctx) {
 }
 
 
-static int custom_rpc_event_handler_with_packed_data(ctrl_cmd_t *app_event) {
-	/* Call the shared implementation from custom_rpc_msg.c */
-	return custom_rpc_event_handler(app_event);
+static int peer_data_event_handler(ctrl_cmd_t *app_event) {
+	return esp_hosted_peer_data_handle_event(app_event);
 }
 
 #define REGISTER_EVENT_CALLBACK(event, callback) \
@@ -1022,14 +1136,23 @@ static int register_needed_event_callbacks(void) {
 	REGISTER_EVENT_CALLBACK(CTRL_EVENT_STATION_DISCONNECT_FROM_AP, default_rpc_events_handler);
 	REGISTER_EVENT_CALLBACK(CTRL_EVENT_STATION_CONNECTED_TO_ESP_SOFTAP, default_rpc_events_handler);
 	REGISTER_EVENT_CALLBACK(CTRL_EVENT_STATION_DISCONNECT_FROM_ESP_SOFTAP, default_rpc_events_handler);
-	REGISTER_EVENT_CALLBACK(CTRL_EVENT_CUSTOM_RPC_UNSERIALISED_MSG, custom_rpc_event_handler_with_packed_data);
+	REGISTER_EVENT_CALLBACK(CTRL_EVENT_DHCP_DNS_STATUS, default_rpc_events_handler);
+	REGISTER_EVENT_CALLBACK(CTRL_EVENT_CUSTOM_RPC_UNSERIALISED_MSG, peer_data_event_handler);
 	return ret;
 }
 
 static void *auto_ip_restore_thread_handler(void *arg) {
 	shell_context_t *ctx = (shell_context_t *)arg;
 
-    (void)ctx;
+#if POLL_FOR_IP_RESTORE
+	/* Also add the IP variables needed */
+#define MAX_IP_FETCH_RETRIES 5         /* Maximum retries for fetching IP */
+	static int ip_fetch_retry_count = 0;   /* Counter for IP fetch retries */
+
+#define IP_FETCH_RETRY_DELAY_MS 500    /* 500ms */
+#endif
+
+	(void)ctx;
 
 	while (!exit_thread_auto_ip_restore) {
 		/* Initialize RPC */
@@ -1069,10 +1192,71 @@ static void *auto_ip_restore_thread_handler(void *arg) {
 			printf("Failed to get SoftAP MAC address, will retry later\n");
 		}
 
-        /* Main monitoring loop */
-        while (!exit_thread_auto_ip_restore && rpc_state == RPC_STATE_ACTIVE) {
-            usleep(NETWORK_CHECK_INTERVAL_MS * 1000);
-        }
+		/* Fetch IP address from slave on boot-up */
+		if (test_is_network_split_on()) {
+			if (update_host_network_port_range(49152, 61439) != SUCCESS) {
+				printf("Failed to update host network port range\n");
+			}
+			if (test_fetch_ip_addr_from_slave() != SUCCESS) {
+				//printf("Failed to fetch IP status\n");
+			}
+		}
+		/* Main monitoring loop */
+		while (!exit_thread_auto_ip_restore && rpc_state == RPC_STATE_ACTIVE) {
+
+#if POLL_FOR_IP_RESTORE
+			if (test_is_network_split_on()) {
+				/* Refresh MAC addresses if they're empty */
+				if (sta_network.mac_addr[0] == '\0') {
+					test_station_mode_get_mac_addr(sta_network.mac_addr);
+				}
+
+				if (ap_network.mac_addr[0] == '\0') {
+					test_softap_mode_get_mac_addr(ap_network.mac_addr);
+				}
+
+				/* Check network status */
+				if (!sta_network.ip_valid || !sta_network.dns_valid) {
+					if (test_fetch_ip_addr_from_slave() != SUCCESS) {
+						printf("Failed to fetch IP status, reinitializing RPC\n");
+						break;
+					}
+
+					/* If IP is still all zeros after fetch, retry a few times */
+					if (sta_network.ip_valid && strcmp(sta_network.ip_addr, "0.0.0.0") == 0) {
+						if (ip_fetch_retry_count < MAX_IP_FETCH_RETRIES) {
+							ip_fetch_retry_count++;
+							printf("Got zeroed IP, retrying fetch (%d/%d)...\n",
+									ip_fetch_retry_count, MAX_IP_FETCH_RETRIES);
+							usleep(IP_FETCH_RETRY_DELAY_MS * 1000);
+							continue;
+						} else {
+							ip_fetch_retry_count = 0;
+						}
+					} else {
+						ip_fetch_retry_count = 0;
+					}
+
+					/* If we got valid IP and have a valid MAC, ensure the network is up */
+					if (sta_network.ip_valid && strcmp(sta_network.ip_addr, "0.0.0.0") != 0 &&
+							sta_network.dns_valid && sta_network.mac_addr[0] != '\0') {
+
+						if (!sta_network.network_up) {
+							printf("Setting up station network interface with IP %s\n", sta_network.ip_addr);
+							if (up_sta_netdev__with_static_ip_dns_route(&sta_network) == SUCCESS) {
+								add_dns(sta_network.dns_addr);
+								sta_network.network_up = 1;
+								printf("Station network interface is now up\n");
+							} else {
+								printf("Failed to set up network interface\n");
+							}
+						}
+					}
+				}
+			}
+#endif
+			usleep(NETWORK_CHECK_INTERVAL_MS * 1000);
+		}
 
 		/* Clean up before potential reinitialization */
 		unregister_event_callbacks();
@@ -1090,11 +1274,11 @@ static void *auto_ip_restore_thread_handler(void *arg) {
 static int start_rpc_auto_ip_restore(void) {
 	printf("Trying to establish connection with Slave\n");
 
-    /* Create app thread */
-    if (pthread_create(&auto_ip_restore_thread, NULL, auto_ip_restore_thread_handler, NULL) != 0) {
-        printf("Failed to create app thread\n");
-        return -1;
-    }
+	/* Create app thread */
+	if (pthread_create(&auto_ip_restore_thread, NULL, auto_ip_restore_thread_handler, NULL) != 0) {
+		printf("Failed to create app thread\n");
+		return -1;
+	}
 
 	return 0;
 }
@@ -1574,32 +1758,11 @@ void shell_hint_callback(const char *line, replxx_hints *hints, int *context_len
 }
 
 
-static int handle_custom_demo_rpc_request(int argc, char **argv) {
+static int handle_peer_data_example(int argc, char **argv) {
+	(void)argc;
+	(void)argv;
 	CHECK_RPC_ACTIVE();
-
-	if (!parse_arguments(argc, argv, custom_rpc_request_args, sizeof(custom_rpc_request_args)/sizeof(cmd_arg_t))) {
-		return FAILURE;
-	}
-
-	const char *demo_str = get_arg_value(argc, argv, custom_rpc_request_args,
-			sizeof(custom_rpc_request_args)/sizeof(cmd_arg_t),
-			"--demo");
-
-	int demo_num = atoi(demo_str);
-
-	printf("Running custom RPC demo %d\n", demo_num);
-
-	switch(demo_num) {
-		case 1:
-			return custom_rpc_demo1_request_only_ack();
-		case 2:
-			return custom_rpc_demo2_request_echo_back_as_response();
-		case 3:
-			return custom_rpc_demo3_request_echo_back_as_event();
-		default:
-			printf("Invalid demo number. Use 1, 2, or 3.\n");
-			return FAILURE;
-	}
+	return peer_data_example_run();
 }
 
 static int handle_set_country_code(int argc, char **argv) {

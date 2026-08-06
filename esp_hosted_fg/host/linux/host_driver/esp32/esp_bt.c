@@ -1,26 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/*
- * Espressif Systems Wireless LAN device driver
- *
- * Copyright (C) 2015-2021 Espressif Systems (Shanghai) PTE LTD
- *
- * This software file (the "File") is distributed by Espressif Systems (Shanghai)
- * PTE LTD under the terms of the GNU General Public License Version 2, June 1991
- * (the "License").  You may use, redistribute and/or modify this File in
- * accordance with the terms and conditions of the License, a copy of which
- * is available by writing to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA or on the
- * worldwide web at http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
- *
- * THE FILE IS DISTRIBUTED AS-IS, WITHOUT WARRANTY OF ANY KIND, AND THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE
- * ARE EXPRESSLY DISCLAIMED.  The License provides additional details about
- * this warranty disclaimer.
- */
+// SPDX-FileCopyrightText: 2015-2026 Espressif Systems (Shanghai) CO LTD
 #include "esp_utils.h"
 #include "esp_bt_api.h"
 #include "esp_api.h"
 #include "esp_kernel_port.h"
+#include "esp_if.h"
 
 #define INVALID_HDEV_BUS (0xff)
 
@@ -83,7 +67,7 @@ void esp_hci_rx(struct esp_adapter *adapter, struct sk_buff *skb)
 	hdev = adapter->hcidev;
 
 	if (unlikely(!hdev)) {
-		esp_err("NULL hcidev, dropping packet\n");
+		//esp_err("NULL hcidev, dropping packet\n");
 		dev_kfree_skb_any(skb);
 		return;
 	}
@@ -128,7 +112,7 @@ void esp_hci_rx(struct esp_adapter *adapter, struct sk_buff *skb)
 	if (ret) {
 		esp_err("Failed to process HCI frame: %d\n", ret);
 		hdev->stat.err_rx++;
-		dev_kfree_skb_any(skb);
+		/* hci_recv_frame() owns/frees skb on all paths; don't double-free */
 	} else {
 		esp_hci_update_rx_counter(hdev, *type, skb->len);
 	}
@@ -206,7 +190,7 @@ static ESP_BT_SEND_FRAME_PROTOTYPE()
 			return -EINVAL;
 		}
 
-		new_skb = esp_alloc_skb(skb->len + pad_len);
+		new_skb = adapter->if_ops->alloc_skb(skb->len + pad_len);
 
 		if (!new_skb) {
 			esp_err("Failed to allocate SKB\n");
@@ -220,7 +204,7 @@ static ESP_BT_SEND_FRAME_PROTOTYPE()
 
 		/* Populate new SKB */
 		skb_copy_from_linear_data(skb, pos, skb->len);
-		skb_put(new_skb, skb->len);
+		skb_put(new_skb, skb->len + pad_len);
 
 		/* Replace old SKB */
 		dev_kfree_skb_any(skb);

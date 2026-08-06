@@ -280,7 +280,7 @@ static int wifi_set_cli_handler(int argc, char *argv[])
 	wifi_config_t wifi_cfg = {
 		.sta = {
 			/* Setting a password implies station will connect to all security modes including WEP/WPA.
-			* However these modes are deprecated and not advisable to be used. Incase your Access point
+			* However these modes are deprecated and not advisable to be used. In case your Access point
 			* doesn't support WPA2, these mode can be enabled by commenting below line */
 			.threshold.authmode = WIFI_AUTH_WPA2_PSK,
 
@@ -442,10 +442,12 @@ int esp_cli_register_cmds()
 {
 	int cmds_num = sizeof(diag_cmds) / sizeof(esp_console_cmd_t);
 	int i;
-	const char* remove_cmd = "deep_sleep";
 
+#if ESP_IDF_VERSION > ESP_IDF_VERSION_VAL(5, 3, 0)
+	const char* remove_cmd = "deep_sleep";
 	ESP_LOGI(TAG, "Remove any existing deep_sleep cmd in cli");
 	esp_console_cmd_deregister(remove_cmd);
+#endif
 
 	for (i = 0; i < cmds_num; i++) {
 		ESP_LOGI(TAG, "Registering command: %s", diag_cmds[i].command);

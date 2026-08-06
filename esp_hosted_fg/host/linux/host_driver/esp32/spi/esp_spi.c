@@ -1,20 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/*
- * Copyright (C) 2015-2021 Espressif Systems (Shanghai) PTE LTD
- *
- * This software file (the "File") is distributed by Espressif Systems (Shanghai)
- * PTE LTD under the terms of the GNU General Public License Version 2, June 1991
- * (the "License").  You may use, redistribute and/or modify this File in
- * accordance with the terms and conditions of the License, a copy of which
- * is available by writing to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA or on the
- * worldwide web at http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
- *
- * THE FILE IS DISTRIBUTED AS-IS, WITHOUT WARRANTY OF ANY KIND, AND THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE
- * ARE EXPRESSLY DISCLAIMED.  The License provides additional details about
- * this warranty disclaimer.
- */
+// SPDX-FileCopyrightText: 2015-2026 Espressif Systems (Shanghai) CO LTD
 #include "esp_utils.h"
 
 #include <linux/device.h>
@@ -46,6 +31,7 @@
 #define ESP_PRIV_FIRMWARE_CHIP_ESP32C2      (0xC)
 #define ESP_PRIV_FIRMWARE_CHIP_ESP32C5      (0x17)
 #define ESP_PRIV_FIRMWARE_CHIP_ESP32C6      (0xD)
+#define ESP_PRIV_FIRMWARE_CHIP_ESP32C61     (0x14)
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0))
   /* gpio_get_value reads raw state & not aware of CS being active low */
@@ -55,8 +41,10 @@
   #define IS_CS_ASSERTED(sPiDeV) gpiod_get_value(((const struct spi_device*)sPiDeV)->cs_gpiod)
 #endif
 
-#ifndef CONFIG_ESP_HOSTED_USE_WORKQUEUE
-  #define CONFIG_ESP_HOSTED_USE_WORKQUEUE (0)
+#ifdef CONFIG_ESP_HOSTED_USE_WORKQUEUE
+#if CONFIG_ESP_HOSTED_USE_WORKQUEUE != 0
+#error "CONFIG_ESP_HOSTED_USE_WORKQUEUE defined, but set to 0"
+#endif
 #endif
 
 static struct sk_buff * read_packet(struct esp_adapter *adapter);
@@ -72,14 +60,38 @@ static char hardware_type = ESP_PRIV_FIRMWARE_CHIP_UNRECOGNIZED;
 static atomic_t tx_pending;
 u8 first_esp_bootup_over;
 
-#if !CONFIG_ESP_HOSTED_USE_WORKQUEUE
+#ifndef CONFIG_ESP_HOSTED_USE_WORKQUEUE
 struct task_struct *spi_thread;
-struct semaphore spi_sem;
 #endif
+
+static struct sk_buff * esp_spi_alloc_skb(u32 len)
+{
+	struct sk_buff *skb = NULL;
+	u32 alloc_len;
+	u8 offset;
+
+	alloc_len = len + INTERFACE_HEADER_PADDING;
+
+	if (alloc_len < SPI_BUF_SIZE)
+		alloc_len = SPI_BUF_SIZE;
+
+	skb = netdev_alloc_skb(NULL, alloc_len);
+
+	if (skb) {
+		/* Align SKB data pointer */
+		offset = ((unsigned long)skb->data) & (SKB_DATA_ADDR_ALIGNMENT - 1);
+
+		if (offset)
+			skb_reserve(skb, INTERFACE_HEADER_PADDING - offset);
+	}
+
+	return skb;
+}
 
 static struct esp_if_ops if_ops = {
 	.read		= read_packet,
 	.write		= write_packet,
+	.alloc_skb	= esp_spi_alloc_skb,
 };
 
 static DEFINE_MUTEX(spi_lock);
@@ -120,11 +132,11 @@ static void close_data_path(void)
 
 static irqreturn_t spi_data_ready_interrupt_handler(int irq, void * dev)
 {
-#if CONFIG_ESP_HOSTED_USE_WORKQUEUE
+#ifdef CONFIG_ESP_HOSTED_USE_WORKQUEUE
 	if (spi_context.spi_workqueue)
 		queue_work(spi_context.spi_workqueue, &spi_context.spi_work);
 #else
-	up(&spi_sem);
+	wake_up_interruptible(&spi_context.spi_wq);
 #endif
 	esp_verbose("\n");
  	return IRQ_HANDLED;
@@ -132,11 +144,11 @@ static irqreturn_t spi_data_ready_interrupt_handler(int irq, void * dev)
 
 static irqreturn_t spi_interrupt_handler(int irq, void * dev)
 {
-#if CONFIG_ESP_HOSTED_USE_WORKQUEUE
+#ifdef CONFIG_ESP_HOSTED_USE_WORKQUEUE
 	if (spi_context.spi_workqueue)
 		queue_work(spi_context.spi_workqueue, &spi_context.spi_work);
 #else
-	up(&spi_sem);
+	wake_up_interruptible(&spi_context.spi_wq);
 #endif
 	esp_verbose("\n");
 	return IRQ_HANDLED;
@@ -197,13 +209,15 @@ static int write_packet(struct esp_adapter *adapter, struct sk_buff *skb)
 		return -EPERM;
 	}
 
+#if 0
 	if (spi_context.adapter->capabilities & ESP_CHECKSUM_ENABLED) {
 		uint16_t len = le16_to_cpu(h->len);
 		uint16_t offset = le16_to_cpu(h->offset);
 		h->checksum = 0;
 		h->checksum = cpu_to_le16(compute_checksum((uint8_t*)h, len + offset));
 	}
-
+#endif
+	atomic_inc(&tx_pending);
 	/* Enqueue SKB in tx_q */
 	if (h->if_type == ESP_SERIAL_IF) {
 		skb_queue_tail(&spi_context.tx_q[PRIO_Q_SERIAL], skb);
@@ -211,14 +225,13 @@ static int write_packet(struct esp_adapter *adapter, struct sk_buff *skb)
 		skb_queue_tail(&spi_context.tx_q[PRIO_Q_BT], skb);
 	} else {
 		skb_queue_tail(&spi_context.tx_q[PRIO_Q_OTHERS], skb);
-		atomic_inc(&tx_pending);
 		if (atomic_read(&tx_pending) >= TX_MAX_PENDING_COUNT) {
 			esp_tx_pause();
 		}
 	}
 
-#if !CONFIG_ESP_HOSTED_USE_WORKQUEUE
-	up(&spi_sem);
+#ifndef CONFIG_ESP_HOSTED_USE_WORKQUEUE
+	wake_up_interruptible(&spi_context.spi_wq);
 #endif
 
 	return 0;
@@ -242,6 +255,7 @@ static void esp_spi_reinit_work(struct work_struct *work)
 		skb_queue_purge(&context->tx_q[prio_q_idx]);
 		skb_queue_purge(&context->rx_q[prio_q_idx]);
 	}
+	atomic_set(&tx_pending, 0);
 
 	/* Re-init queues */
 	for (prio_q_idx = 0; prio_q_idx < MAX_PRIORITY_QUEUES; prio_q_idx++) {
@@ -309,6 +323,7 @@ int process_init_event(u8 *evt_buf, u8 len)
 		(hardware_type != ESP_PRIV_FIRMWARE_CHIP_ESP32C3) &&
 		(hardware_type != ESP_PRIV_FIRMWARE_CHIP_ESP32C5) &&
 		(hardware_type != ESP_PRIV_FIRMWARE_CHIP_ESP32C6) &&
+		(hardware_type != ESP_PRIV_FIRMWARE_CHIP_ESP32C61) &&
 		(hardware_type != ESP_PRIV_FIRMWARE_CHIP_ESP32S3)) {
 		esp_err("ESP board type [%d] is not recognized: aborting\n", hardware_type);
 		hardware_type = ESP_PRIV_FIRMWARE_CHIP_UNRECOGNIZED;
@@ -321,7 +336,7 @@ int process_init_event(u8 *evt_buf, u8 len)
 		return 0;
 	}
 
-	/* First bootup - do direct init */
+	/* First boot-up - do direct init */
 	ret = esp_add_card(spi_context.adapter);
 	if (ret) {
 		spi_exit();
@@ -465,6 +480,17 @@ static void esp_spi_transaction(void)
 		struct esp_payload_header *h;
 		uint16_t len, offset;
 
+		/* SPI requires fixed-size transfers. Pad to SPI_BUF_SIZE if needed.
+		 * skb_put_padto() will use tailroom if available (no realloc) */
+		if (tx_skb->len < SPI_BUF_SIZE) {
+			if (skb_put_padto(tx_skb, SPI_BUF_SIZE)) {
+				/* Failed to pad, skb already freed */
+				esp_err("Failed to pad TX buffer to SPI size\n");
+				tx_skb = NULL;
+				goto out;
+			}
+		}
+
 		trans.tx_buf = tx_skb->data;
 		h = (struct esp_payload_header *) trans.tx_buf;
 		UPDATE_HEADER_TX_PKT_NO(h);
@@ -481,7 +507,7 @@ static void esp_spi_transaction(void)
 #if ESP_PKT_NUM_DEBUG
 		struct esp_payload_header *h;
 #endif
-		tx_skb = esp_alloc_skb(SPI_BUF_SIZE);
+		tx_skb = spi_context.adapter->if_ops->alloc_skb(SPI_BUF_SIZE);
 		trans.tx_buf = skb_put(tx_skb, SPI_BUF_SIZE);
 		memset((void*)trans.tx_buf, 0, SPI_BUF_SIZE);
 
@@ -492,7 +518,7 @@ static void esp_spi_transaction(void)
 #endif
 	}
 
-	rx_skb = esp_alloc_skb(SPI_BUF_SIZE);
+	rx_skb = spi_context.adapter->if_ops->alloc_skb(SPI_BUF_SIZE);
 	rx_buf = skb_put(rx_skb, SPI_BUF_SIZE);
 	memset(rx_buf, 0, SPI_BUF_SIZE);
 	trans.rx_buf = rx_buf;
@@ -520,6 +546,7 @@ static void esp_spi_transaction(void)
 		dev_kfree_skb(tx_skb);
 	}
 
+out:
 	mutex_unlock(&spi_lock);
 
 #if defined(CONFIG_ESP_HOSTED_USE_WORKQUEUE)
@@ -688,7 +715,7 @@ static int spi_dev_init(struct esp_spi_context *context)
 
 	return 0;
 }
-#if CONFIG_ESP_HOSTED_USE_WORKQUEUE
+#ifdef CONFIG_ESP_HOSTED_USE_WORKQUEUE
 static inline void esp_spi_work(struct work_struct *work)
 {
 	esp_spi_transaction();
@@ -702,14 +729,19 @@ static int esp_spi_thread(void *data)
 
 	while (!kthread_should_stop()) {
 
-		if (down_interruptible(&spi_sem)) {
-			esp_verbose("Failed to acquire spi_sem\n");
-			msleep(10);
-			continue;
+		wait_event_interruptible(context->spi_wq,
+			(gpio_get_value(context->dataready_gpio) ||
+			!skb_queue_empty(&context->tx_q[PRIO_Q_SERIAL]) ||
+			!skb_queue_empty(&context->tx_q[PRIO_Q_BT]) ||
+			!skb_queue_empty(&context->tx_q[PRIO_Q_OTHERS])) ||
+			kthread_should_stop());
+
+		if (kthread_should_stop()) {
+			break;
 		}
 
 		if (atomic_read(&context->adapter->state) != ESP_CONTEXT_READY) {
-			msleep(10);
+			msleep(100);
 			continue;
 		}
 
@@ -734,7 +766,7 @@ static int spi_init(void)
 	/* Init reinit work */
 	INIT_WORK(&spi_context.reinit_work, esp_spi_reinit_work);
 
-#if CONFIG_ESP_HOSTED_USE_WORKQUEUE
+#ifdef CONFIG_ESP_HOSTED_USE_WORKQUEUE
 	esp_info("ESP: Using SPI Workqueue solution\n");
 
 	spi_context.spi_workqueue = alloc_workqueue("ESP_SPI_WORK_QUEUE",
@@ -749,8 +781,8 @@ static int spi_init(void)
 	INIT_WORK(&spi_context.spi_work, esp_spi_work);
 	INIT_DELAYED_WORK(&spi_context.spi_delayed_work, esp_spi_work);
 #else
-	esp_info("ESP: Using SPI semaphore solution\n");
-	sema_init(&spi_sem, 0);
+	esp_info("ESP: Using SPI thread solution\n");
+	init_waitqueue_head(&spi_context.spi_wq);
 	spi_thread = kthread_run(esp_spi_thread, spi_context.adapter, "esp32_spi");
 	if (!spi_thread) {
 		esp_err("Failed to create esp32_spi thread\n");
@@ -810,14 +842,14 @@ static void spi_exit(void)
 		skb_queue_purge(&spi_context.tx_q[prio_q_idx]);
 		skb_queue_purge(&spi_context.rx_q[prio_q_idx]);
 	}
-#if CONFIG_ESP_HOSTED_USE_WORKQUEUE
+	atomic_set(&tx_pending, 0);
+#ifdef CONFIG_ESP_HOSTED_USE_WORKQUEUE
 	if (spi_context.spi_workqueue) {
 		flush_workqueue(spi_context.spi_workqueue);
 		destroy_workqueue(spi_context.spi_workqueue);
 		spi_context.spi_workqueue = NULL;
 	}
 #else
-	up(&spi_sem);
 	if (spi_thread) {
 		kthread_stop(spi_thread);
 		spi_thread = NULL;
@@ -874,7 +906,7 @@ int esp_init_interface_layer(struct esp_adapter *adapter)
 	    (adapter->mod_param.spi_mode      == MOD_PARAM_UNINITIALISED) ||
 	    (adapter->mod_param.spi_handshake == MOD_PARAM_UNINITIALISED) ||
 	    (adapter->mod_param.spi_dataready == MOD_PARAM_UNINITIALISED)) {
-		esp_err("Incorrect/Uncomplete SPI config.\n\n");
+		esp_err("Incorrect/Incomplete SPI config.\n\n");
 		esp_err("You can use one of methods:\n[A] Use module params to pass:\n\t\t1) spi_bus=<bus_instance> \n\t\t2) spi_cs=<CS_instance> \n\t\t3) spi_mode=<1/2/3> \n\t\t4) spi_handshake=<gpio_val> \n\t\t5) spi_dataready=<gpio_val> \n\t\t6) resetpin=<gpio_val>\n[B] hardcode above params in start of main.c\n");
 		return -EINVAL;
 	}

@@ -59,7 +59,7 @@ This solution provides following WLAN and BT/BLE features to the host:
 
 ESP-Hosted-NG solution is supported on following ESP boards:
 
-| Supported Targets | ESP32 | ESP32-S2 | ESP32-S3 | ESP32-C2 | ESP32-C3 | ESP32-C6 | ESP32-C5 |
+| Supported Targets | ESP32 | ESP32-S2 | ESP32-S3 | ESP32-C2 | ESP32-C3 | ESP32-C5 | ESP32-C6/C61 |
 | ----------------- | ----- | -------- | -------- | -------- | -------- | -------- | -------- |
 
 
@@ -235,6 +235,16 @@ The below table explains which feature is supported on which transport interface
     </tr>
     <tr>
       <td style="text-align:center;">SDIO(WiFi) + UART(BT)</td>
+      <td style="text-align:center;">&#10003;</td>
+      <td style="text-align:center;">&#10003;</td>
+    </tr>
+      <td rowspan="2" style="text-align:center;">ESP32-C61</td>
+      <td style="text-align:center;">SPI</td>
+      <td style="text-align:center;">&#10003;</td>
+      <td style="text-align:center;">&#10003;</td>
+    </tr>
+    <tr>
+      <td style="text-align:center;">SDIO</td>
       <td style="text-align:center;">&#10003;</td>
       <td style="text-align:center;">&#10003;</td>
     </tr>
@@ -507,6 +517,101 @@ Following operations for station are supported as of now:
 > $ ping <ip address of AP>
 > ```
 ></p></details>
+<details><summary>WPA2/WPA3 Enterprise</summary>
+<p>
+
+>
+> ## WPA2/WPA3 Enterprise mode connect
+> Note the SSID, username, and password of the WPA2/WPA3 enterprise AP to connect.
+>
+> The ESP-Hosted-NG solution supports both WPA2 Enterprise and WPA3 Enterprise authentication modes through EAP (Extensible Authentication Protocol) when operating in Station mode.
+> 
+> ### Create config & Trigger connection
+> * `wpa_supplicant` already running on host operating system can interfere in testing. Execute following commands to prevent this.
+> ```sh
+> $ sudo killall wpa_supplicant
+> ```
+>
+> * Generate wpa_supplicant config using below template for PEAP/MSCHAPv2
+> ```sh
+> $ cat ~/wpa2_ent.conf
+> ctrl_interface=/var/run/wpa_supplicant
+> ap_scan=0
+> network={
+>     ssid="MY_ENTERPRISE_SSID"
+>     key_mgmt=WPA-EAP
+>     eap=PEAP
+>     identity="user@domain.com"
+>     password="user_password"
+>     ca_cert="/path/to/ca-cert.pem"
+>     phase2="auth=MSCHAPV2"
+> }
+> ```
+> 
+> * Alternative template for EAP-TLS
+> ```sh
+> $ cat ~/wpa2_tls.conf
+> ctrl_interface=/var/run/wpa_supplicant
+> ap_scan=0
+> network={
+>     ssid="MY_ENTERPRISE_SSID"
+>     key_mgmt=WPA-EAP
+>     eap=TLS
+>     identity="user@domain.com"
+>     client_cert="/path/to/client-cert.pem"
+>     private_key="/path/to/private-key.pem"
+>     ca_cert="/path/to/ca-cert.pem"
+> }
+> ```
+> 
+> * Change `MY_ENTERPRISE_SSID` to AP's SSID, `user@domain.com` to your username, and `user_password` to your password
+> * Update certificate paths to match your enterprise environment
+> 
+> * Start the wpa supplicant for connection
+> ```sh
+> $ sudo wpa_supplicant -D nl80211 -i wlan0 -c ~/wpa2_ent.conf
+> ```
+>
+> ---
+> ### Verify connection
+> * Verify the connection status using following command and verify `ESSID:<ssid>` in output
+> ```sh
+> $ iwconfig wlan0
+>   wlan0     IEEE 802.11  ESSID:"MY_ENTERPRISE_SSID"
+>             Mode:Managed  Frequency:2.412 GHz  Access Point: C4:41:1E:BE:F0:B2
+>             Retry short limit:7   RTS thr:off   Fragment thr:off
+>             Power Management:on
+> ```
+>
+> ---
+> ### Assign IP address
+> * Use dhclient command to get IP. Please note, `dhclient` command may not be available on all Linux. Use DHCP client command supported on your Linux.
+> ```sh
+> $ sudo dhclient -v wlan0
+> Internet Systems Consortium DHCP Client 4.4.1
+> Copyright 2004-2018 Internet Systems Consortium.
+> All rights reserved.
+> For info, please visit https://www.isc.org/software/dhcp/
+> Listening on LPF/wlan0/24:6f:28:80:2c:34
+> Sending on   LPF/wlan0/24:6f:28:80:2c:34
+> Sending on   Socket/fallback
+> .
+> DHCPDISCOVER on wlan0 to 255.255.255.255 port 67 interval 7
+> DHCPOFFER of 192.168.43.32 from 192.168.43.1
+> DHCPREQUEST for 192.168.43.32 on wlan0 to 255.255.255.255 port 67
+> DHCPACK of 192.168.43.32 from 192.168.43.1
+> bound to 192.168.43.32 -- renewal in 1482 seconds.
+>
+> ```
+>
+> ---
+>
+> ### Ping
+>
+> ```sh
+> $ ping <ip address of AP>
+> ```
+></p></details>
 
 
 #### Disconnect from AP
@@ -526,7 +631,7 @@ Following operations for station are supported as of now:
 
 hostapd (Host Access Point Daemon) is a user-space daemon that enables a Linux-based machine to act as a wireless access point. When combined with dnsmasq, a lightweight DHCP and DNS server, it provides a complete solution for managing Wi-Fi networks, including IP address assignment and name resolution.
 
-> make sure you have enabled `ap_support` with rpi_init.sh to user interface as Acess point. Read [Hardware and Software Setup and OTA](docs/setup.md)
+> make sure you have enabled `ap_support` with rpi_init.sh to user interface as Access point. Read [Hardware and Software Setup and OTA](docs/setup.md)
 
 Supported Operations
 
@@ -747,12 +852,19 @@ Refer [RAW throughput guide](docs/Raw_TP_Testing.md) for verifying connection as
 </thead>
 <tbody>
 <tr>
-<td rowspan=2 align="center">ESP32</td>
-<td rowspan=1 align="center">SDIO</td>
-<td align="center">22.9 Mbps</td>
-<td align="center">15.6 Mbps</td>
-<td align="center">45.6 Mbps</td>
-<td align="center">20.4 Mbps</td>
+<td rowspan=3 align="center">ESP32</td>
+<td align="center">SDIO 2.4 GHz (40MHz)</td>
+<td align="center">43.5 Mbps</td>
+<td align="center">24.8 Mbps</td>
+<td align="center">47.6 Mbps</td>
+<td align="center">49.1 Mbps</td>
+</tr>
+<tr>
+<td align="center">SDIO 2.4 GHz (20MHz)</td>
+<td align="center">32.4 Mbps</td>
+<td align="center">28.3 Mbps</td>
+<td align="center">36.1 Mbps</td>
+<td align="center">41.7 Mbps</td>
 </tr>
 <tr>
 <td align="center">SPI</td>
@@ -770,22 +882,85 @@ Refer [RAW throughput guide](docs/Raw_TP_Testing.md) for verifying connection as
 <td align="center">14.9 Mbps</td>
 </tr>
 <tr>
-<td rowspan=2 align="center">ESP32-C5</td>
-<td rowspan=1 align="center">SDIO 2.4 ghz</td>
-<td align="center">11.2 Mbps</td>
-<td align="center">19.4 Mbps</td>
-<td align="center">37.8 Mbps</td>
-<td align="center">25.9 Mbps</td>
+<td rowspan=4 align="center">ESP32-C5</td>
+<td align="center">SDIO 2.4 GHz (11n 40MHz)</td>
+<td align="center">62.3 Mbps</td>
+<td align="center">60.3 Mbps</td>
+<td align="center">97.2 Mbps</td>
+<td align="center">81.7 Mbps</td>
 </tr>
 <tr>
-<td align="center">SDIO 5 ghz</td>
-<td align="center">19.7 Mbps</td>
-<td align="center">18.4 Mbps</td>
-<td align="center">53.5 Mbps</td>
-<td align="center">30.4 Mbps</td>
+<td align="center">SDIO 2.4 GHz (11ax 20MHz)</td>
+<td align="center">52.7 Mbps</td>
+<td align="center">42.4 Mbps</td>
+<td align="center">66.2 Mbps</td>
+<td align="center">49.4 Mbps</td>
+</tr>
+<tr>
+<td align="center">SDIO 5 GHz (11n 40MHz)</td>
+<td align="center">63.3 Mbps</td>
+<td align="center">52.5 Mbps</td>
+<td align="center">97.8 Mbps</td>
+<td align="center">81.3 Mbps</td>
+</tr>
+<tr>
+<td align="center">SDIO 5 GHz (11ax 20MHz)</td>
+<td align="center">54.8 Mbps</td>
+<td align="center">47.6 Mbps</td>
+<td align="center">68 Mbps</td>
+<td align="center">65 Mbps</td>
+</tr>
+<tr>
+<td rowspan=3 align="center">ESP32-C6</td>
+<td align="center">SDIO 2.4 GHz (40MHz)</td>
+<td align="center">41.7 Mbps</td>
+<td align="center">51 Mbps</td>
+<td align="center">90.4 Mbps</td>
+<td align="center">58.4 Mbps</td>
+</tr>
+<tr>
+<td align="center">SDIO 2.4 GHz (20MHz)</td>
+<td align="center">40.9 Mbps</td>
+<td align="center">55.6 Mbps</td>
+<td align="center">67.8 Mbps</td>
+<td align="center">68.3 Mbps</td>
+</tr>
+<tr>
+<td align="center">SPI</td>
+<td align="center">16.2 Mbps</td>
+<td align="center">16.9 Mbps</td>
+<td align="center">17.5 Mbps</td>
+<td align="center">17.2 Mbps</td>
+</tr>
+<tr>
+<td rowspan=3 align="center">ESP32-C61</td>
+<td align="center">SDIO 2.4 GHz (40MHz)</td>
+<td align="center">42.3 Mbps</td>
+<td align="center">41.5 Mbps</td>
+<td align="center">57.2 Mbps</td>
+<td align="center">45.3 Mbps</td>
+</tr>
+<tr>
+<td align="center">SDIO 2.4 GHz (20MHz)</td>
+<td align="center">42.6 Mbps</td>
+<td align="center">40.7 Mbps</td>
+<td align="center">64 Mbps</td>
+<td align="center">44.6 Mbps</td>
+</tr>
+<tr>
+<td align="center">SPI</td>
+<td align="center">13.3 Mbps</td>
+<td align="center">13.6 Mbps</td>
+<td align="center">13.9 Mbps</td>
+<td align="center">14 Mbps</td>
 </tr>
 </tbody>
 </table>
+
+> [!NOTE]
+> - **Host Platforms Used**:
+>   - **ESP32-C5**: Tested on **Raspberry Pi 5** with SDIO clock frequency set to **50 MHz**.
+>   - **Other Chipsets** (ESP32, ESP32-C3, ESP32-C6, ESP32-C61): Tested on **Raspberry Pi 4B** with SDIO clock frequency set to **41.67 MHz**.
 
 ---
 
@@ -833,8 +1008,7 @@ Tremendous work to be done ahead! Below is glimpse of upcoming release:
 ---
 
 - Functionality
-	- esp32c61 support
-
+	- Wifi Enterprise support
 ---
 
 # 8. Want to support?

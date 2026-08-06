@@ -1,5 +1,5 @@
-// Copyright 2015-2022 Espressif Systems (Shanghai) PTE LTD
-/* SPDX-License-Identifier: GPL-2.0-only OR Apache-2.0 */
+// SPDX-FileCopyrightText: 2015-2026 Espressif Systems (Shanghai) CO LTD
+// SPDX-License-Identifier: GPL-2.0-only OR Apache-2.0
 
 #include <stdlib.h>
 #include <string.h>
@@ -115,7 +115,7 @@ static int32_t expected_resp_uid = -1;
  * 1. If application wants to use synchrounous, i.e. Wait till the response received
  *    after current control request is sent or timeout occurs,
  *    application will pass this callback in request as NULL.
- * 2. If application wants to use `asynchrounous`, i.e. Just send the request and
+ * 2. If application wants to use `asynchronous`, i.e. Just send the request and
  *    unblock for next processing, application will assign function pointer in
  *    control request, which will be registered here.
  *    When the response comes, the this registered callback function will be called
@@ -262,8 +262,8 @@ static int ctrl_app_parse_event(CtrlMsg *ctrl_msg, ctrl_cmd_t *app_ntfy)
 					ctrl_msg->event_station_connected_to_esp_softap->aid;
 				app_ntfy->u.e_softap_sta_conn.is_mesh_child =
 					ctrl_msg->event_station_connected_to_esp_softap->is_mesh_child;
-				break;
 			}
+			break;
 		} case CTRL_EVENT_STATION_DISCONNECT_FROM_ESP_SOFTAP: {
 			CHECK_CTRL_MSG_NON_NULL(event_station_disconnect_from_esp_softap);
 			app_ntfy->resp_event_status =
@@ -286,6 +286,33 @@ static int ctrl_app_parse_event(CtrlMsg *ctrl_msg, ctrl_cmd_t *app_ntfy)
 					ctrl_msg->event_station_disconnect_from_esp_softap->is_mesh_child;
 				app_ntfy->u.e_softap_sta_disconn.reason =
 					ctrl_msg->event_station_disconnect_from_esp_softap->reason;
+			}
+			break;
+		} case CTRL_EVENT_DHCP_DNS_STATUS: {
+			CHECK_CTRL_MSG_NON_NULL(event_set_dhcp_dns_status);
+			app_ntfy->resp_event_status = ctrl_msg->event_set_dhcp_dns_status->resp;
+			app_ntfy->u.dhcp_dns_status.iface = ctrl_msg->event_set_dhcp_dns_status->iface;
+			app_ntfy->u.dhcp_dns_status.dhcp_up = ctrl_msg->event_set_dhcp_dns_status->dhcp_up;
+			app_ntfy->u.dhcp_dns_status.dns_up = ctrl_msg->event_set_dhcp_dns_status->dns_up;
+			app_ntfy->u.dhcp_dns_status.dns_type = ctrl_msg->event_set_dhcp_dns_status->dns_type;
+			app_ntfy->u.dhcp_dns_status.net_link_up = ctrl_msg->event_set_dhcp_dns_status->net_link_up;
+
+			if (ctrl_msg->event_set_dhcp_dns_status->dhcp_up) {
+				memcpy(app_ntfy->u.dhcp_dns_status.dhcp_ip,
+						ctrl_msg->event_set_dhcp_dns_status->dhcp_ip.data,
+						ctrl_msg->event_set_dhcp_dns_status->dhcp_ip.len);
+				memcpy(app_ntfy->u.dhcp_dns_status.dhcp_nm,
+						ctrl_msg->event_set_dhcp_dns_status->dhcp_nm.data,
+						ctrl_msg->event_set_dhcp_dns_status->dhcp_nm.len);
+				memcpy(app_ntfy->u.dhcp_dns_status.dhcp_gw,
+						ctrl_msg->event_set_dhcp_dns_status->dhcp_gw.data,
+						ctrl_msg->event_set_dhcp_dns_status->dhcp_gw.len);
+			}
+
+			if (ctrl_msg->event_set_dhcp_dns_status->dns_up) {
+				memcpy(app_ntfy->u.dhcp_dns_status.dns_ip,
+						ctrl_msg->event_set_dhcp_dns_status->dns_ip.data,
+						ctrl_msg->event_set_dhcp_dns_status->dns_ip.len);
 			}
 			break;
 		} case CTRL_EVENT_CUSTOM_RPC_UNSERIALISED_MSG: {
@@ -356,7 +383,7 @@ static int ctrl_app_parse_resp(CtrlMsg *ctrl_msg, ctrl_cmd_t *app_resp)
 	/* if app_resp->uid is 0, slave fw is not updated to return uid
 	 * so we skip this check */
 	if (app_resp->uid && (expected_resp_uid != app_resp->uid)) {
-		// response uid mis-match: ignore this response
+		// response uid mismatch: ignore this response
 		goto fail_parse_ctrl_msg2;
 	}
 
@@ -465,6 +492,8 @@ static int ctrl_app_parse_resp(CtrlMsg *ctrl_msg, ctrl_cmd_t *app_resp)
 					p->rssi = ctrl_msg->resp_get_ap_config->rssi;
 					p->encryption_mode = ctrl_msg->resp_get_ap_config->sec_prot;
 					p->band_mode = ctrl_msg->resp_get_ap_config->band_mode;
+					p->bandwidth = ctrl_msg->resp_get_ap_config->bw;
+					p->protocol = ctrl_msg->resp_get_ap_config->protocol;
 					break;
 
 				case FAILURE:
@@ -551,6 +580,8 @@ static int ctrl_app_parse_resp(CtrlMsg *ctrl_msg, ctrl_cmd_t *app_resp)
 				ctrl_msg->resp_get_softap_config->bw;
 			app_resp->u.wifi_softap_config.band_mode =
 				ctrl_msg->resp_get_softap_config->band_mode;
+			app_resp->u.wifi_softap_config.protocol =
+				ctrl_msg->resp_get_softap_config->protocol;
 
 			break;
 		} case CTRL_RESP_SET_SOFTAP_VND_IE : {
@@ -687,6 +718,48 @@ static int ctrl_app_parse_resp(CtrlMsg *ctrl_msg, ctrl_cmd_t *app_resp)
 			app_resp->u.fw_version.minor = ctrl_msg->resp_get_fw_version->minor;
 			app_resp->u.fw_version.revision_patch_1 = ctrl_msg->resp_get_fw_version->rev_patch1;
 			app_resp->u.fw_version.revision_patch_2 = ctrl_msg->resp_get_fw_version->rev_patch2;
+			break;
+		} case CTRL_RESP_SET_DHCP_DNS_STATUS: {
+			CHECK_CTRL_MSG_NON_NULL(resp_set_dhcp_dns_status);
+			CHECK_CTRL_MSG_FAILED(resp_set_dhcp_dns_status);
+			break;
+		} case CTRL_RESP_GET_DHCP_DNS_STATUS: {
+			CtrlMsgRespGetDhcpDnsStatus *p_c = ctrl_msg->resp_get_dhcp_dns_status;
+			dhcp_dns_status_t *p_a = &app_resp->u.dhcp_dns_status;
+			CHECK_CTRL_MSG_NON_NULL(resp_get_dhcp_dns_status);
+
+			app_resp->resp_event_status = ctrl_msg->resp_get_dhcp_dns_status->resp;
+
+			if (app_resp->resp_event_status != SUCCESS) {
+				/* Do not print error, as slave may be built without network split, just escape */
+				break;
+			}
+			p_a->dhcp_up = p_c->dhcp_up;
+			p_a->dns_up = p_c->dns_up;
+			p_a->net_link_up = p_c->net_link_up;
+			p_a->dns_type = p_c->dns_type;
+
+			if (p_c->dhcp_up) {
+				if (p_c->dhcp_ip.data) {
+					strncpy((char *)p_a->dhcp_ip, (char *)p_c->dhcp_ip.data, sizeof(p_a->dhcp_ip));
+					p_a->dhcp_ip[sizeof(p_a->dhcp_ip)-1] = '\0';
+				}
+				if (p_c->dhcp_nm.data) {
+					strncpy((char *)p_a->dhcp_nm, (char *)p_c->dhcp_nm.data, sizeof(p_a->dhcp_nm));
+					p_a->dhcp_nm[sizeof(p_a->dhcp_nm)-1] = '\0';
+				}
+				if (p_c->dhcp_gw.data) {
+					strncpy((char *)p_a->dhcp_gw, (char *)p_c->dhcp_gw.data, sizeof(p_a->dhcp_gw));
+					p_a->dhcp_gw[sizeof(p_a->dhcp_gw)-1] = '\0';
+				}
+			}
+
+			if (p_c->dns_up) {
+				if (p_c->dns_ip.data) {
+					strncpy((char *)p_a->dns_ip, (char *)p_c->dns_ip.data, sizeof(p_a->dns_ip));
+					p_a->dns_ip[sizeof(p_a->dns_ip)-1] = '\0';
+				}
+			}
 			break;
 		} case CTRL_RESP_CUSTOM_RPC_UNSERIALISED_MSG: {
 			CtrlMsgRespCustomRpcUnserialisedMsg *p_c = ctrl_msg->resp_custom_rpc_unserialised_msg;
@@ -943,6 +1016,7 @@ static void ctrl_rx_thread(void const *arg)
 		/* 3.2 Decode protobuf */
 		resp = ctrl_msg__unpack(NULL, buf_len, buf);
 		if (!resp) {
+			command_log("unpack failed buf_len=%u\n", buf_len);
 			goto free_bufs;
 		}
 		/* 3.3 Free the read buffer */
@@ -1122,7 +1196,7 @@ static int is_async_resp_callback_registered_by_resp_msg_id(int resp_msg_id)
 
 
 /* Check if async control response callback is available
- * Returns CALLBACK_AVAILABLE if a non NULL asynchrounous control response
+ * Returns CALLBACK_AVAILABLE if a non NULL asynchronous control response
  * callback is available. It will return failure -
  *     MSG_ID_OUT_OF_ORDER - if request msg id is unsupported
  *     CALLBACK_NOT_REGISTERED - if aync callback is not available
@@ -1227,6 +1301,7 @@ static void ctrl_async_timeout_handler(void const *arg)
 	ctrl_resp_cb_t func = arg;
 	if (!func) {
 		command_log("NULL func, failed to call callback\n");
+		expected_resp_uid = -1;
 		hosted_post_semaphore(ctrl_req_sem);
 		return;
 	}
@@ -1234,6 +1309,7 @@ static void ctrl_async_timeout_handler(void const *arg)
 	app_resp = (ctrl_cmd_t *)hosted_calloc(1, sizeof(ctrl_cmd_t));
 	if (!app_resp) {
 		command_log("Failed to allocate app_resp\n");
+		expected_resp_uid = -1;
 		hosted_post_semaphore(ctrl_req_sem);
 		return;
 	}
@@ -1242,6 +1318,7 @@ static void ctrl_async_timeout_handler(void const *arg)
 
 	/* call func pointer to notify failure */
 	func(app_resp);
+	expected_resp_uid = -1;
 
 	/* only one async timer at a time is handled
 	 * therefore, only one wifi request can be sent at a time
@@ -1330,7 +1407,8 @@ int ctrl_app_send_req(ctrl_cmd_t *app_req)
 		case CTRL_REQ_OTA_END:
 		case CTRL_REQ_GET_WIFI_CURR_TX_POWER:
 		case CTRL_REQ_GET_FW_VERSION:
-		case CTRL_REQ_GET_COUNTRY_CODE: {
+		case CTRL_REQ_GET_COUNTRY_CODE:
+		case CTRL_REQ_GET_DHCP_DNS_STATUS: {
 			/* Intentional fallthrough & empty */
 			break;
 		} case CTRL_REQ_GET_AP_SCAN_LIST: {
@@ -1414,6 +1492,8 @@ int ctrl_app_send_req(ctrl_cmd_t *app_req)
 			req_payload->is_wpa3_supported = p->is_wpa3_supported;
 			req_payload->listen_interval = p->listen_interval;
 			req_payload->band_mode = p->band_mode;
+			req_payload->bw = p->bandwidth;
+			req_payload->protocol = p->protocol;
 			break;
 		} case CTRL_REQ_SET_SOFTAP_VND_IE: {
 			wifi_softap_vendor_ie_t *p = &app_req->u.wifi_softap_vendor_ie;
@@ -1513,6 +1593,7 @@ int ctrl_app_send_req(ctrl_cmd_t *app_req)
 			req_payload->ssid_hidden = p->ssid_hidden;
 			req_payload->bw = p->bandwidth;
 			req_payload->band_mode = p->band_mode;
+			req_payload->protocol = p->protocol;
 			break;
 		} case CTRL_REQ_SET_PS_MODE: {
 			wifi_power_save_t * p = &app_req->u.wifi_ps;
@@ -1580,18 +1661,43 @@ int ctrl_app_send_req(ctrl_cmd_t *app_req)
 			//command_log("%sable feature [%d]\n", (req_payload->enable)? "en": "dis", req_payload->feature);
 			break;
 		} case CTRL_REQ_CUSTOM_RPC_UNSERIALISED_MSG: {
-			CTRL_ALLOC_ASSIGN(CtrlMsgReqCustomRpcUnserialisedMsg, req_custom_rpc_unserialised_msg);
-			ctrl_msg__req__custom_rpc_unserialised_msg__init(req_payload);
-			req_payload->custom_msg_id = app_req->u.custom_rpc_unserialised_data.custom_msg_id;
-			req_payload->data.data = app_req->u.custom_rpc_unserialised_data.data;
-			req_payload->data.len = app_req->u.custom_rpc_unserialised_data.data_len;
-			break;
-		} default: {
-			failure_status = CTRL_ERR_UNSUPPORTED_MSG;
-			command_log("RPC Req[%u] unsupported\n",req.msg_id);
-			goto fail_req;
-			break;
-		}
+            CTRL_ALLOC_ASSIGN(CtrlMsgReqCustomRpcUnserialisedMsg, req_custom_rpc_unserialised_msg);
+            ctrl_msg__req__custom_rpc_unserialised_msg__init(req_payload);
+            req_payload->custom_msg_id = app_req->u.custom_rpc_unserialised_data.custom_msg_id;
+            req_payload->data.data = app_req->u.custom_rpc_unserialised_data.data;
+            req_payload->data.len = app_req->u.custom_rpc_unserialised_data.data_len;
+            break;
+        } case CTRL_REQ_SET_DHCP_DNS_STATUS: {
+            dhcp_dns_status_t *p = &app_req->u.dhcp_dns_status;
+            CTRL_ALLOC_ASSIGN(CtrlMsgReqSetDhcpDnsStatus, req_set_dhcp_dns_status);
+            ctrl_msg__req__set_dhcp_dns_status__init(req_payload);
+
+            req_payload->iface = p->iface;
+            req_payload->dhcp_up = p->dhcp_up;
+            req_payload->dns_up = p->dns_up;
+            req_payload->dns_type = p->dns_type;
+            req_payload->net_link_up = p->net_link_up;
+
+            if (p->dhcp_up) {
+                req_payload->dhcp_ip.data = (uint8_t *)p->dhcp_ip;
+				req_payload->dhcp_ip.len = strlen((char *)p->dhcp_ip) + 1;
+				req_payload->dhcp_nm.data = (uint8_t *)p->dhcp_nm;
+				req_payload->dhcp_nm.len = strlen((char *)p->dhcp_nm) + 1;
+				req_payload->dhcp_gw.data = (uint8_t *)p->dhcp_gw;
+				req_payload->dhcp_gw.len = strlen((char *)p->dhcp_gw) + 1;
+			}
+
+			if (p->dns_up) {
+				req_payload->dns_ip.data = (uint8_t *)p->dns_ip;
+				req_payload->dns_ip.len = strlen((char *)p->dns_ip) + 1;
+			}
+            break;
+        } default: {
+            failure_status = CTRL_ERR_UNSUPPORTED_MSG;
+            command_log("RPC Req[%u] unsupported\n",req.msg_id);
+            goto fail_req;
+            break;
+        }
 	}
 
 	/* 4. Protobuf msg size */
@@ -1652,6 +1758,8 @@ int ctrl_app_send_req(ctrl_cmd_t *app_req)
 	return SUCCESS;
 
 fail_req:
+	/* Ensure expected response state is cleared on any send/compose failure. */
+	expected_resp_uid = -1;
 
 	if (got_ctrl_req_sem) {
 		hosted_post_semaphore(ctrl_req_sem);
@@ -1698,18 +1806,9 @@ int deinit_hosted_control_lib_internal(void)
 
 	set_ctrl_lib_state(CTRL_LIB_STATE_INACTIVE);
 
-	if (ctrl_msg_Q) {
-		esp_queue_destroy(&ctrl_msg_Q);
-	}
-
-	if (ctrl_req_sem && hosted_destroy_semaphore(ctrl_req_sem)) {
+	if (ctrl_rx_thread_handle && cancel_ctrl_rx_thread()) {
 		ret = FAILURE;
-		command_log("ctrl req sem deinit failed\n");
-	}
-
-	if (read_sem && hosted_destroy_semaphore(read_sem)) {
-		ret = FAILURE;
-		command_log("read sem deinit failed\n");
+		command_log("cancel ctrl rx thread failed\n");
 	}
 
 	if (async_timer_handle) {
@@ -1723,9 +1822,18 @@ int deinit_hosted_control_lib_internal(void)
 		//command_log("Serial de-init failed\n");
 	}
 
-	if (ctrl_rx_thread_handle && cancel_ctrl_rx_thread()) {
+	if (ctrl_msg_Q) {
+		esp_queue_destroy(&ctrl_msg_Q);
+	}
+
+	if (ctrl_req_sem && hosted_destroy_semaphore(ctrl_req_sem)) {
 		ret = FAILURE;
-		command_log("cancel ctrl rx thread failed\n");
+		command_log("ctrl req sem deinit failed\n");
+	}
+
+	if (read_sem && hosted_destroy_semaphore(read_sem)) {
+		ret = FAILURE;
+		command_log("read sem deinit failed\n");
 	}
 
 	return ret;

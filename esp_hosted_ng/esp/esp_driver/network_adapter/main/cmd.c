@@ -49,7 +49,16 @@ extern volatile uint8_t softap_started;
 
 volatile uint8_t sta_init_flag;
 
+/* EAP and IEEE 802.1X constants */
+#define IEEE802_1X_VERSION                  2
+#define IEEE802_1X_TYPE_EAP_PACKET          0
+#define EAP_CODE_REQUEST                    1
+#define EAP_CODE_RESPONSE                   2
+#define EAP_CODE_SUCCESS                    3
+#define EAP_CODE_FAILURE                    4
+
 static struct wpa_funcs wpa_cb;
+static struct wpa2_funcs *wpa2_cb;
 static esp_event_handler_instance_t instance_any_id;
 static uint8_t *ap_bssid;
 
@@ -372,6 +381,91 @@ DONE:
     return;
 }
 
+int wpa2_sm_rx_eapol(uint8_t *src_addr, uint8_t *buf, uint32_t len, uint8_t *bssid)
+{
+    if (len >= 8) {
+        uint8_t eapol_type = buf[1];
+        uint8_t eap_code = buf[5];
+
+        if (eapol_type == IEEE802_1X_TYPE_EAP_PACKET) {
+            if (eap_code == EAP_CODE_SUCCESS) {
+                ESP_LOGI(TAG, "EAP Success received");
+                esp_wifi_set_wpa2_ent_state_internal(WPA2_ENT_EAP_STATE_SUCCESS);
+            } else if (eap_code == EAP_CODE_FAILURE) {
+                ESP_LOGI(TAG, "EAP Failure received");
+                esp_wifi_set_wpa2_ent_state_internal(WPA2_ENT_EAP_STATE_FAIL);
+            }
+        }
+    }
+
+    return station_rx_eapol(src_addr, buf, len);
+}
+
+static int wpa2_start_eapol(void)
+{
+    return ESP_OK;
+}
+
+static int eap_peer_sm_init(void)
+{
+    esp_wifi_set_wpa2_ent_state_internal(WPA2_ENT_EAP_STATE_NOT_START);
+    return 0;
+}
+
+static void eap_peer_sm_deinit(void)
+{
+
+}
+
+static esp_err_t esp_client_enable_fn(void *arg)
+{
+    ESP_LOGI(TAG, "WiFi Enterprise enable for network_adapter");
+
+    return ESP_OK;
+}
+
+static esp_err_t eap_client_disable_fn(void *param)
+{
+    esp_wifi_unregister_wpa2_cb_internal();
+
+    ESP_LOGI(TAG, "EAP disabled for network_adapter");
+    return ESP_OK;
+}
+
+esp_err_t esp_hosted_sta_enterprise_enable(void)
+{
+    wifi_wpa2_param_t param;
+    esp_err_t ret;
+
+    param.fn = (wifi_wpa2_fn_t)esp_client_enable_fn;
+    param.param = NULL;
+
+    ret = esp_wifi_sta_wpa2_ent_enable_internal(&param);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to enable eap for network_adapter, ret=%d", ret);
+    }
+
+    return ret;
+}
+
+esp_err_t esp_hosted_sta_enterprise_disable(void)
+{
+    wifi_wpa2_param_t param;
+    esp_err_t ret;
+
+
+    param.fn = (wifi_wpa2_fn_t)eap_client_disable_fn;
+    param.param = NULL;
+
+    ret = esp_wifi_sta_wpa2_ent_disable_internal(&param);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to disable eap for network_adapter, ret=%d", ret);
+    }
+
+    return ret;
+}
 void handle_sta_disconnected_event(wifi_event_sta_disconnected_t *disconnected, bool wakeup_flag)
 {
     interface_buffer_handle_t buf_handle = {0};
@@ -379,6 +473,9 @@ void handle_sta_disconnected_event(wifi_event_sta_disconnected_t *disconnected, 
     esp_err_t ret = ESP_OK;
 
     ESP_LOGI(TAG, "STA Disconnect event: %d\n", disconnected->reason);
+
+    esp_wifi_unregister_wpa2_cb_internal();
+    wpa2_cb = NULL;
 
     ret = prepare_event(ESP_STA_IF, &buf_handle, sizeof(struct disconnect_event));
     if (ret) {
@@ -417,6 +514,7 @@ DONE:
     cleanup_ap_bssid();
     return;
 }
+
 
 static int sta_rx_assoc(uint8_t type, uint8_t *frame, size_t len, uint8_t *sender,
                         uint32_t rssi, uint8_t channel, uint64_t current_tsf)
@@ -924,8 +1022,17 @@ esp_err_t initialise_wifi(void)
         return result;
     }
 
+    /* Disable Wi-Fi modem-sleep (default is WIFI_PS_MIN_MODEM). With modem
+     * sleep enabled the AP buffers downlink frames and delivers them at the
+     * DTIM beacon interval (~102ms), which shows up as a ~100ms sawtooth on
+     * ping latency for traffic sourced from peers behind the AP. esp_hosted
+     * is a line-powered adapter, so we trade power for minimum RX latency. */
+    esp_wifi_set_ps(WIFI_PS_NONE);
+
     esp_wifi_set_debug_log();
 
+    /* Register to get events from wifi driver */
+    esp_create_wifi_event_loop();
     /* Register callback functions with wifi driver */
     memset(&wpa_cb, 0, sizeof(struct wpa_funcs));
 
@@ -956,6 +1063,8 @@ esp_err_t initialise_wifi(void)
     wpa_cb.wpa_ap_rx_mgmt    = handle_wpa_ap_rx_mgmt;
 
     esp_wifi_register_wpa_cb_internal(&wpa_cb);
+
+    esp_hosted_sta_enterprise_enable();
 
     result = esp_wifi_set_mode(WIFI_MODE_NULL);
     if (result) {
@@ -1011,7 +1120,7 @@ int process_start_scan(uint8_t if_type, uint8_t *payload, uint16_t payload_len)
             esp_wifi_register_mgmt_frame_internal(0, 0);
         }
     } else {
-        ESP_LOGI(TAG, "Scan not permited as WiFi is not yet up");
+        ESP_LOGI(TAG, "Scan not permitted as WiFi is not yet up");
         cmd_status = CMD_RESPONSE_FAIL;
 
         /* Reset frame registration */
@@ -1402,6 +1511,19 @@ int process_auth_request(uint8_t if_type, uint8_t *payload, uint16_t payload_len
             wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA_PSK;;
         }
 
+	if (auth_type == WIFI_AUTH_WPA2_ENTERPRISE ||
+			auth_type == WIFI_AUTH_WPA3_ENT_192 ||
+			auth_type == WIFI_AUTH_WPA3_ENTERPRISE ||
+			auth_type == WIFI_AUTH_WPA2_WPA3_ENTERPRISE ||
+			auth_type == WIFI_AUTH_WPA_ENTERPRISE) {
+		wpa2_cb = (struct wpa2_funcs*)malloc(sizeof(struct wpa2_funcs));
+		wpa2_cb->wpa2_sm_rx_eapol = wpa2_sm_rx_eapol;
+		wpa2_cb->wpa2_start = wpa2_start_eapol;
+		wpa2_cb->wpa2_init = eap_peer_sm_init;
+		wpa2_cb->wpa2_deinit = eap_peer_sm_deinit;
+		esp_wifi_register_wpa2_cb_internal(wpa2_cb);
+	}
+
         ESP_LOGD(TAG, "AUTH type=%d password used=%s\n", auth_type, wifi_config.sta.password);
         memcpy(wifi_config.sta.bssid, cmd_auth->bssid, MAC_ADDR_LEN);
         wifi_config.sta.bssid_set = 1;
@@ -1410,6 +1532,37 @@ int process_auth_request(uint8_t if_type, uint8_t *payload, uint16_t payload_len
 
         /* Common handling for rest sec prot */
         ESP_LOGI(TAG, "AUTH Commit\n");
+
+#if 0
+#ifdef CONFIG_SOC_WIFI_SUPPORT_5G
+        wifi_protocols_t protocols = {
+            .ghz_2g = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N,
+            .ghz_5g = WIFI_PROTOCOL_11A | WIFI_PROTOCOL_11N,
+        };
+        ret = esp_wifi_set_protocols(WIFI_IF_STA, &protocols);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to set protocols ret=%d", ret);
+        }
+        wifi_bandwidths_t bw = {
+            .ghz_2g = WIFI_BW_HT40,
+            .ghz_5g = WIFI_BW_HT40,
+        };
+        ret = esp_wifi_set_bandwidths(WIFI_IF_STA, &bw);
+        if (ret) {
+            ESP_LOGE(TAG, "Failed to set wifi bandwidth: %d\n", ret);
+        }
+#else
+        ret = esp_wifi_set_protocol(WIFI_IF_STA,
+                WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to set protocol ret=%d", ret);
+        }
+        ret = esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT40);
+        if (ret) {
+            ESP_LOGE(TAG, "Failed to set wifi bandwidth: %d\n", ret);
+        }
+#endif
+#endif
         ret = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
         if (ret) {
             ESP_LOGE(TAG, "Failed to set wifi config: %d\n", ret);
@@ -1545,8 +1698,6 @@ int process_init_interface(uint8_t if_type, uint8_t *payload, uint16_t payload_l
     uint16_t cmd_status = CMD_RESPONSE_FAIL;
 
     if (!sta_init_flag || (if_type == ESP_AP_IF && !softap_started)) {
-        /* Register to get events from wifi driver */
-        esp_create_wifi_event_loop();
 
         /* Use same MAC for AP and STA */
         esp_read_mac(dev_mac, ESP_MAC_WIFI_STA);
@@ -2066,7 +2217,7 @@ int process_mgmt_tx(uint8_t if_type, uint8_t *payload, uint16_t payload_len)
         ESP_LOGI(TAG, "%s: broadcast address, sending response immediately\n", __func__);
         goto send_resp;
     }
-    /* send response in seperate ctx once done */
+    /* send response in separate ctx once done */
     return 0;
 send_resp:
     return send_mgmt_tx_done(cmd_status, wifi_if_type, NULL, 0);

@@ -9,6 +9,7 @@
 #include "utils.h"
 #include "esp_stats.h"
 #include "esp_kernel_port.h"
+#include "esp_if.h"
 
 #if TEST_RAW_TP
 
@@ -54,23 +55,28 @@ static int raw_tp_tx_process(void *data)
 	pad_len = sizeof(struct esp_payload_header);
 	total_len = TEST_RAW_TP__BUF_SIZE + pad_len;
 	pad_len += SKB_DATA_ADDR_ALIGNMENT - (total_len % SKB_DATA_ADDR_ALIGNMENT);
+	total_len = TEST_RAW_TP__BUF_SIZE + pad_len;
 
 	msleep(2000);
-	adapter = esp_get_adapter();
-	priv = adapter->priv[0];
 
 	while (!kthread_should_stop()) {
+		adapter = esp_get_adapter();
+		if (!adapter || !adapter->priv[0]) {
+			msleep(10);
+			continue;
+		}
+		priv = adapter->priv[0];
 
 		if (esp_is_tx_queue_paused(priv)) {
 
-			tx_skb = esp_alloc_skb(TEST_RAW_TP__BUF_SIZE);
+			tx_skb = esp_if_alloc_skb(adapter, total_len);
 			if (!tx_skb) {
-				esp_info("%u esp_alloc_skb failed\n", __LINE__);
+				esp_info("%u adapter->if_ops->alloc_skb failed\n", __LINE__);
 				msleep(10);
 				continue;
 			}
-			memset(tx_skb->data, 0, TEST_RAW_TP__BUF_SIZE);
-			tx_skb->len = TEST_RAW_TP__BUF_SIZE;
+			skb_put(tx_skb, total_len);
+			memset(tx_skb->data, 0, total_len);
 			cb = (struct esp_skb_cb *) tx_skb->cb;
 			cb->priv = priv;
 
@@ -87,13 +93,23 @@ static int raw_tp_tx_process(void *data)
 					cpu_to_le16(compute_checksum(tx_skb->data,
 								(TEST_RAW_TP__BUF_SIZE + pad_len)));
 			}
-			ret = esp_send_packet(esp_get_adapter(), tx_skb);
-			if (!ret)
+			if (!adapter->if_ops || !adapter->if_ops->write) {
+				dev_kfree_skb_any(tx_skb);
+				msleep(10);
+				continue;
+			}
+			ret = esp_send_packet(adapter, tx_skb);
+			if (!ret) {
 				test_raw_tp_len += TEST_RAW_TP__BUF_SIZE;
+			}
 
 		} else {
-			if (traffic_open_init_done)
-				wait_for_completion_interruptible(&traffic_open);
+			if (traffic_open_init_done) {
+				reinit_completion(&traffic_open);
+				if (!esp_is_tx_queue_paused(priv)) {
+					wait_for_completion_interruptible(&traffic_open);
+				}
+			}
 		}
 	}
 	esp_info("raw tp tx thrd stopped\n");

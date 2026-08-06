@@ -1,17 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright 2015-2021 Espressif Systems (Shanghai) PTE LTD
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-FileCopyrightText: 2015-2026 Espressif Systems (Shanghai) CO LTD
 //
 #include <stdint.h>
 #include <interface.h>
@@ -118,7 +106,7 @@ void process_hci_rx_pkt(uint8_t *payload, uint16_t payload_len) {
 		return;
 
 	/* VHCI needs one extra byte at the start of payload */
-	/* that is accomodated in esp_payload_header */
+	/* that is accommodated in esp_payload_header */
 	ESP_HEXLOGV("bt_rx", payload, payload_len, 32);
 
 	payload--;
@@ -408,12 +396,12 @@ static void init_uart_esp32(void)
 }
 #endif /* CONFIG_IDF_TARGET_ESP32 */
 
-#if (defined(CONFIG_IDF_TARGET_ESP32C2) || defined(CONFIG_IDF_TARGET_ESP32C6)) || defined(CONFIG_IDF_TARGET_ESP32C5)
+#if (defined(CONFIG_IDF_TARGET_ESP32C2) || defined(CONFIG_IDF_TARGET_ESP32C6) || defined(CONFIG_IDF_TARGET_ESP32C61)) || defined(CONFIG_IDF_TARGET_ESP32C5)
 static void init_uart_c2_c6_c5(void)
 {
-	ESP_LOGD(TAG, "Set-up BLE for ESP32-C2/C6/C5");
+	ESP_LOGD(TAG, "Set-up BLE for ESP32-C2/C6/C61/C5");
 
-#if defined(CONFIG_IDF_TARGET_ESP32C2) || defined(CONFIG_IDF_TARGET_ESP32C6) || defined(CONFIG_IDF_TARGET_ESP32C5)
+#if defined(CONFIG_IDF_TARGET_ESP32C2) || defined(CONFIG_IDF_TARGET_ESP32C6) || defined(CONFIG_IDF_TARGET_ESP32C61) || defined(CONFIG_IDF_TARGET_ESP32C5)
 	//ESP_ERROR_CHECK( uart_set_pin(BLUETOOTH_UART, BT_TX_PIN,
 	//  BT_RX_PIN, BT_RTS_PIN, BT_CTS_PIN) );
 	ESP_LOGI(TAG, "UART Pins: Tx:%u Rx:%u", BT_TX_PIN, BT_RX_PIN);
@@ -427,7 +415,7 @@ void init_uart(void)
 {
 #if CONFIG_IDF_TARGET_ESP32
 	init_uart_esp32();
-#elif (defined(CONFIG_IDF_TARGET_ESP32C2) || defined(CONFIG_IDF_TARGET_ESP32C6)) || defined(CONFIG_IDF_TARGET_ESP32C5)
+#elif (defined(CONFIG_IDF_TARGET_ESP32C2) || defined(CONFIG_IDF_TARGET_ESP32C6) || defined(CONFIG_IDF_TARGET_ESP32C61)) || defined(CONFIG_IDF_TARGET_ESP32C5)
 	init_uart_c2_c6_c5();
 #elif BT_OVER_C3_S3
 	init_uart_c3_s3();
@@ -436,9 +424,8 @@ void init_uart(void)
 #endif
 
 #if BLUETOOTH_HCI
-#if SOC_ESP_NIMBLE_CONTROLLER
+#if SOC_ESP_NIMBLE_CONTROLLER && (ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 3, 0))
 
-#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 3, 0)
 #include "nimble/ble_hci_trans.h"
 
 typedef enum {
@@ -453,12 +440,6 @@ typedef enum {
 
 /* ACL_DATA_MBUF_LEADINGSPACE: The leadingspace in user info header for ACL data */
 #define ACL_DATA_MBUF_LEADINGSPACE    4
-
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 3, 0)
-void ble_transport_ll_init(void)
-{
-}
-#endif
 
 void esp_vhci_host_send_packet(uint8_t *data, uint16_t len)
 {
@@ -514,9 +495,8 @@ ble_hs_rx_data(struct os_mbuf *om, void *arg)
 	os_mbuf_free_chain(om);
 	return 0;
 }
-#endif /* ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 3, 0) */
 
-#endif /* SOC_ESP_NIMBLE_CONTROLLER */
+#endif /* SOC_ESP_NIMBLE_CONTROLLER && (ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 3, 0)) */
 #endif /* BLUETOOTH_HCI */
 
 esp_err_t initialise_bluetooth(void)
@@ -556,12 +536,11 @@ esp_err_t initialise_bluetooth(void)
 			(ble_hci_trans_rx_acl_fn *)ble_hs_rx_data,NULL);
 #else
 	ret = esp_vhci_host_register_callback(&vhci_host_cb);
-#endif /* SOC_ESP_NIMBLE_CONTROLLER */
-
 	if (ret != ESP_OK) {
 		ESP_LOGE(TAG, "Failed to register VHCI callback");
 		return ret;
 	}
+#endif /* SOC_ESP_NIMBLE_CONTROLLER && (ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 3, 0)) */
 
 	vhci_send_sem = xSemaphoreCreateBinary();
 	if (vhci_send_sem == NULL) {

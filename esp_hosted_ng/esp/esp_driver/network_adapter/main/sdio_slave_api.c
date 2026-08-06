@@ -32,8 +32,18 @@
 #include "stats.h"
 #include "soc/gpio_reg.h"
 #include "esp_fw_version.h"
+#include "esp_heap_caps.h"
+#include "esp_memory_utils.h"
 
-static uint8_t sdio_slave_rx_buffer[RX_BUF_NUM][RX_BUF_SIZE];
+#include "hal/sdio_slave_ll.h"
+
+#define SDIO_DMA_ALIGNMENT_BYTES    4
+#define SDIO_DMA_ALIGNMENT_MASK     (SDIO_DMA_ALIGNMENT_BYTES - 1)
+#define IS_SDIO_DMA_ALIGNED(val)    (!((uint32_t)(val) & SDIO_DMA_ALIGNMENT_MASK))
+
+uint32_t rx_buf_size = 15872;
+uint32_t sdio_tx_aggr_size = 15872;
+static uint8_t *sdio_slave_rx_buffer[RX_BUF_NUM];
 
 static interface_context_t context;
 static interface_handle_t if_handle_g;
@@ -104,6 +114,37 @@ static interface_handle_t * sdio_init(void)
 {
     esp_err_t ret = ESP_OK;
     sdio_slave_buf_handle_t handle = {0};
+
+    /* Dynamically calculate RX_BUF_SIZE and SDIO_TX_AGGR_SIZE based on hardware bitfields */
+
+    /*
+     * rx_buf_size — max SDIO CMD53 payload per transfer
+     *
+     * Sized from two hardware limits:
+     *
+     * 1) ESP SDIO slave DMA descriptor: size and length are 14/12-bit fields
+     *    (sdio_slave_ll_desc_t), so one descriptor can cover at most 2^14 - 1 = 16383/4095 bytes.
+     *
+     * 2) SDIO block mode (ESP_BLOCK_SIZE = 512): CMD53 block transfers must be
+     *    multiples of 512 bytes.
+     *
+     * Largest 512-byte-aligned size that fits in one descriptor:
+     * esp32c6/esp32c5/esp32c61
+     *   floor(16383 / 512) = 31 blocks
+     *   31 * 512 = 15872
+     * (32 * 512 = 16384 exceeds the 14-bit limit.)
+     * esp32:
+     *   floor(4095 / 512) = 7 blocks
+     *   7 * 512 = 3584
+     *
+     */
+
+    sdio_slave_ll_desc_t dummy;
+    memset(&dummy, 0xFF, sizeof(dummy));
+    rx_buf_size = (dummy.size / 512) * 512;
+    sdio_tx_aggr_size = rx_buf_size;
+    ESP_LOGI(TAG, "Calculated RX_BUF_SIZE dynamically: %lu (desc.size limit: %lu)", (unsigned long)rx_buf_size, (unsigned long)dummy.size);
+
     sdio_slave_config_t config = {
         .sending_mode       = SDIO_SLAVE_SEND_STREAM,
         .send_queue_size    = SDIO_SLAVE_QUEUE_SIZE,
@@ -121,7 +162,7 @@ static interface_handle_t * sdio_init(void)
          * In these cases, Please tune timing below using value from
          * https://github.com/espressif/esp-idf/blob/release/v5.0/components/hal/include/hal/sdio_slave_types.h#L26-L38
          * */
-#if defined(CONFIG_IDF_TARGET_ESP32C6)
+#if defined(CONFIG_IDF_TARGET_ESP32C6) || defined(CONFIG_IDF_TARGET_ESP32C61)
         .timing             = SDIO_SLAVE_TIMING_NSEND_PSAMPLE,
 #endif
     };
@@ -152,6 +193,8 @@ static interface_handle_t * sdio_init(void)
     gpio_config(&io_conf);
 
     for (int i = 0; i < RX_BUF_NUM; i++) {
+        sdio_slave_rx_buffer[i] = heap_caps_malloc(rx_buf_size, MALLOC_CAP_DMA);
+        assert(sdio_slave_rx_buffer[i] != NULL);
         handle = sdio_slave_recv_register_buf(sdio_slave_rx_buffer[i]);
         assert(handle != NULL);
 
@@ -231,6 +274,7 @@ static int32_t sdio_write(interface_handle_t *handle, interface_buffer_handle_t 
     uint8_t* sendbuf = NULL;
     uint16_t offset = 0;
     struct esp_payload_header *header = NULL;
+    bool free_sendbuf = false;
 
     if (!handle || !buf_handle) {
         ESP_LOGE(TAG, "Invalid arguments");
@@ -250,48 +294,101 @@ static int32_t sdio_write(interface_handle_t *handle, interface_buffer_handle_t 
         return ESP_FAIL;
     }
 
-    total_len = buf_handle->payload_len + sizeof(struct esp_payload_header);
 
-    sendbuf = heap_caps_malloc(total_len, MALLOC_CAP_DMA);
-    if (sendbuf == NULL) {
-        ESP_LOGE(TAG, "Malloc send buffer fail!");
-        return ESP_FAIL;
+    uint32_t align_padding = 0;
+    offset = sizeof(struct esp_payload_header);
+    if (IS_WIFI_DATA_PACKET(buf_handle)) {
+        /* As Wi-Fi esf-buf has headroom of rx_ctrl before Wi-Fi data pointer, we can use that space to store packet header.
+         * This way we do not need to alloc and memcpy again */
+        uint32_t payload_addr = (uint32_t)buf_handle->payload;
+        align_padding = (SDIO_DMA_ALIGNMENT_BYTES - (payload_addr % SDIO_DMA_ALIGNMENT_BYTES)) % SDIO_DMA_ALIGNMENT_BYTES;
+        sendbuf = (uint8_t *)buf_handle->payload - sizeof(struct esp_payload_header) - align_padding;
+        if (!esp_ptr_dma_capable(sendbuf) || !IS_SDIO_DMA_ALIGNED(sendbuf)) {
+            align_padding = 0;
+            sendbuf = heap_caps_malloc(buf_handle->payload_len + offset, MALLOC_CAP_DMA);
+            if (sendbuf == NULL) {
+                ESP_LOGE(TAG, "Malloc send buffer fail!");
+                return ESP_ERR_NO_MEM;
+            }
+            memcpy(sendbuf + offset, buf_handle->payload, buf_handle->payload_len);
+            free_sendbuf = true;
+        }
+    } else {
+
+        sendbuf = heap_caps_malloc(buf_handle->payload_len + offset, MALLOC_CAP_DMA);
+        if (sendbuf == NULL) {
+            ESP_LOGE(TAG, "Malloc send buffer fail!");
+            return ESP_ERR_NO_MEM;
+        }
+
+        memcpy(sendbuf + offset, buf_handle->payload, buf_handle->payload_len);
+
+        if (buf_handle->free_buf_handle && buf_handle->payload) {
+            buf_handle->free_buf_handle(buf_handle->payload);
+        }
+
+        buf_handle->priv_buffer_handle = sendbuf;
+        buf_handle->free_buf_handle = heap_caps_free;
     }
 
-    header = (struct esp_payload_header *) sendbuf;
-
-    memset(header, 0, sizeof(struct esp_payload_header));
+    total_len = buf_handle->payload_len + offset + align_padding;
+    header = (struct esp_payload_header *)sendbuf;
+    memset(header, 0, sizeof(struct esp_payload_header) + align_padding);
 
     /* Initialize header */
     header->if_type = buf_handle->if_type;
     header->if_num = buf_handle->if_num;
     header->len = htole16(buf_handle->payload_len);
     header->reserved2 = buf_handle->flag;
-    offset = sizeof(struct esp_payload_header);
-    header->offset = htole16(offset);
+    header->offset = htole16(sizeof(struct esp_payload_header) + align_padding);
     header->packet_type = buf_handle->pkt_type;
-
-    memcpy(sendbuf + offset, buf_handle->payload, buf_handle->payload_len);
 
 #if CONFIG_ESP_SDIO_CHECKSUM
     header->checksum = htole16(compute_checksum(sendbuf,
-                                                offset + buf_handle->payload_len));
+                                                total_len));
 #endif
 
     ret = sdio_slave_transmit(sendbuf, total_len);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "sdio slave transmit error, ret : 0x%x\r\n", ret);
-        free(sendbuf);
-        return ESP_FAIL;
+        if (free_sendbuf) {
+            heap_caps_free(sendbuf);
+        }
+        return ret;
+    }
+    if (free_sendbuf) {
+        heap_caps_free(sendbuf);
     }
 #if 0
     ESP_LOGE(TAG, "\nTo Host");
     ESP_LOG_BUFFER_HEXDUMP("s->h", buf_handle->payload,
                            buf_handle->payload_len, ESP_LOG_INFO);
 #endif
-    free(sendbuf);
 
     return buf_handle->payload_len;
+}
+
+int32_t sdio_write_aggr(interface_handle_t *handle, uint8_t *payload,
+                        uint16_t payload_len)
+{
+    esp_err_t ret = ESP_OK;
+
+    if (!handle || !payload || !payload_len) {
+        ESP_LOGE(TAG, "Invalid aggregate write arguments");
+        return ESP_FAIL;
+    }
+
+    if (handle->state != ACTIVE || power_save_on) {
+        return ESP_FAIL;
+    }
+
+    ret = sdio_slave_transmit(payload, payload_len);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "sdio slave aggregate transmit error, ret: 0x%x\r\n", ret);
+        return ret;
+    }
+
+    return payload_len;
 }
 
 esp_err_t send_bootup_event_to_host(uint8_t cap)
@@ -335,6 +432,13 @@ esp_err_t send_bootup_event_to_host(uint8_t cap)
     *pos = LENGTH_1_BYTE;                 pos++; len++;
     *pos = cap;                           pos++; len++;
 
+    /* TLV - Slave RX Buffer Size */
+    *pos = ESP_BOOTUP_RX_BUF_SIZE;        pos++; len++;
+    *pos = 4;                             pos++; len++;
+    uint32_t rx_buf_sz = htole32(RX_BUF_SIZE);
+    memcpy(pos, &rx_buf_sz, sizeof(rx_buf_sz));
+    pos += sizeof(rx_buf_sz);             len += sizeof(rx_buf_sz);
+
     /* TLV - FW data */
     *pos = ESP_BOOTUP_FW_DATA;            pos++; len++;
     *pos = sizeof(struct fw_data);        pos++; len++;
@@ -370,7 +474,7 @@ esp_err_t send_bootup_event_to_host(uint8_t cap)
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "sdio slave tx error, ret : 0x%x\r\n", ret);
         free(buf_handle.payload);
-        return ESP_FAIL;
+        return ret;
     }
 
     free(buf_handle.payload);
@@ -379,11 +483,6 @@ esp_err_t send_bootup_event_to_host(uint8_t cap)
 
 static int sdio_read(interface_handle_t *if_handle, interface_buffer_handle_t *buf_handle)
 {
-    struct esp_payload_header *header = NULL;
-#if CONFIG_ESP_SDIO_CHECKSUM
-    uint16_t rx_checksum = 0, checksum = 0;
-#endif
-    uint16_t len = 0;
     size_t sdio_read_len = 0;
 
     if (!if_handle) {
@@ -399,34 +498,12 @@ static int sdio_read(interface_handle_t *if_handle, interface_buffer_handle_t *b
                     &(sdio_read_len), portMAX_DELAY);
     buf_handle->payload_len = sdio_read_len & 0xFFFF;
 
-    header = (struct esp_payload_header *) buf_handle->payload;
-
-    len = le16toh(header->len) + le16toh(header->offset);
-
-#if CONFIG_ESP_SDIO_CHECKSUM
-    rx_checksum = le16toh(header->checksum);
-    header->checksum = 0;
-
-    if (len > RX_BUF_SIZE) {
-        return -1;
-    }
-
-    checksum = compute_checksum(buf_handle->payload, len);
-
-    if (checksum != rx_checksum) {
-        sdio_read_done(buf_handle->sdio_buf_handle);
-        return ESP_FAIL;
-    }
-#endif
-
-    buf_handle->if_type = header->if_type;
-    buf_handle->if_num = header->if_num;
     buf_handle->free_buf_handle = sdio_read_done;
 #if 0
     ESP_LOGE(TAG, "\nFrom Host");
-    ESP_LOG_BUFFER_HEXDUMP("h->s", buf_handle->payload, len, ESP_LOG_INFO);
+    ESP_LOG_BUFFER_HEXDUMP("h->s", buf_handle->payload, buf_handle->payload_len, ESP_LOG_INFO);
 #endif
-    return len;
+    return buf_handle->payload_len;
 }
 
 static esp_err_t sdio_reset(interface_handle_t *handle)
@@ -474,4 +551,10 @@ static void sdio_deinit(interface_handle_t *handle)
     }
     sdio_slave_stop();
     sdio_slave_reset();
+    for (int i = 0; i < RX_BUF_NUM; i++) {
+        if (sdio_slave_rx_buffer[i]) {
+            free(sdio_slave_rx_buffer[i]);
+            sdio_slave_rx_buffer[i] = NULL;
+        }
+    }
 }

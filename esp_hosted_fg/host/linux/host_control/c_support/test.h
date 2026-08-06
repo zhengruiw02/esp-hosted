@@ -1,22 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/*
- * Espressif Systems Wireless LAN device driver
- *
- * Copyright (C) 2015-2021 Espressif Systems (Shanghai) PTE LTD
- *
- * This software file (the "File") is distributed by Espressif Systems (Shanghai)
- * PTE LTD under the terms of the GNU General Public License Version 2, June 1991
- * (the "License").  You may use, redistribute and/or modify this File in
- * accordance with the terms and conditions of the License, a copy of which
- * is available by writing to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA or on the
- * worldwide web at http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
- *
- * THE FILE IS DISTRIBUTED AS-IS, WITHOUT WARRANTY OF ANY KIND, AND THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE
- * ARE EXPRESSLY DISCLAIMED.  The License provides additional details about
- * this warranty disclaimer.
- */
+// SPDX-FileCopyrightText: 2015-2026 Espressif Systems (Shanghai) CO LTD
 
 #ifndef __TEST_H__
 #define __TEST_H__
@@ -70,6 +53,12 @@ int test_ota_write(uint8_t* ota_data, uint32_t ota_data_len);
 int test_ota_end(void);
 int register_event_callbacks(void);
 int unregister_event_callbacks(void);
+
+/* STA connect result, set by the event callback. */
+enum { STA_CONN_PENDING = 0, STA_CONN_CONNECTED, STA_CONN_DISCONNECTED };
+extern volatile int g_sta_conn_result;
+int test_wait_sta_connect(int timeout_sec); /* optional blocking wait; returns STA_CONN_* */
+void test_set_run_dhcp_client(bool enable);
 int test_config_heartbeat(void);
 int test_disable_heartbeat(void);
 int test_disable_heartbeat_async(void);
@@ -77,6 +66,7 @@ int test_disable_bt(void);
 int test_enable_bt(void);
 int test_disable_wifi(void);
 int test_enable_wifi(void);
+int test_is_network_split_on(void);
 char * test_get_fw_version(char *, uint16_t);
 int test_print_fw_version(void);
 int test_set_country_code_with_ieee80211d_on();
@@ -84,18 +74,20 @@ int test_set_country_code();
 int test_set_country_code_with_params(const char *code);
 int test_get_country_code();
 int test_fetch_ip_addr_from_slave(void);
+int test_set_dhcp_dns_status(char *sta_ip, char *sta_nm, char *sta_gw, char *sta_dns);
 int test_softap_mode_set_vendor_ie(bool enable, const char *data);
 int test_station_mode_connect_with_params(const char *ssid, const char *pwd, const char *bssid,
-		bool use_wpa3, int listen_interval, int band_mode);
+		bool use_wpa3, int listen_interval, int band_mode, int bandwidth, int protocol);
 int test_station_mode_disconnect_with_params(bool reset_dhcp);
 int test_softap_mode_start_with_params(const char *ssid, const char *pwd, int channel,
 		const char *sec_prot, int max_conn, bool hide_ssid,
-		int bw, int band_mode);
+		int bw, int band_mode, int protocol);
 int test_wifi_set_power_save_mode_with_params(int psmode);
 int test_get_fw_version_with_params(char *version, uint16_t version_size);
 int test_ota_update_with_params(const char *url);
 int test_heartbeat_with_params(bool enable, int duration);
 int test_set_mac_addr_with_params(int mode, const char *mac);
+int test_set_dhcp_dns_status_with_params(char *sta_ip, char *sta_nm, char *sta_gw, char *sta_dns);
 int test_set_vendor_specific_ie_with_params(bool enable, const char *data);
 int test_set_wifi_power_save_mode_with_params(int psmode);
 int test_get_fw_version_with_params(char *version, uint16_t version_size);
@@ -109,4 +101,5 @@ int default_rpc_resp_handler(ctrl_cmd_t *app_resp);
 int test_validate_ctrl_event(ctrl_cmd_t *app_event);
 int test_validate_ctrl_resp(ctrl_cmd_t *app_resp);
 
+int test_is_network_split_on(void);
 #endif

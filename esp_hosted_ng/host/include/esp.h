@@ -48,6 +48,7 @@ enum chipset_type_e {
 	ESP_FIRMWARE_CHIP_ESP32S3 = 0x9,
 	ESP_FIRMWARE_CHIP_ESP32C2 = 0x0C,
 	ESP_FIRMWARE_CHIP_ESP32C6 = 0x0D,
+	ESP_FIRMWARE_CHIP_ESP32C61 = 0x14,
 	ESP_FIRMWARE_CHIP_ESP32C5 = 0x17,
 };
 
@@ -64,7 +65,7 @@ struct esp_adapter;
 #define MAX_COUNTRY_LEN 3
 
 enum adapter_flags_e {
-	ESP_CLEANUP_IN_PROGRESS,    /* Driver unloading or ESP reseted */
+	ESP_CLEANUP_IN_PROGRESS,    /* Driver unloading or ESP reset */
 	ESP_CMD_INIT_DONE,          /* Cmd component is initialized with esp_commands_setup() */
 	ESP_DRIVER_ACTIVE,          /* kernel module __exit is not yet invoked */
 	ESP_INIT_DONE,              /* Driver init done */
@@ -73,6 +74,7 @@ enum adapter_flags_e {
 
 enum priv_flags_e {
 	ESP_NETWORK_UP,
+	ESP_INTERFACE_INITIALIZED,
 };
 
 struct command_node {
@@ -128,6 +130,7 @@ struct esp_adapter {
 
 	unsigned long           state_flags;
 	int                     chipset;
+	u32                     tx_aggr_size;
 };
 
 struct esp_device {
